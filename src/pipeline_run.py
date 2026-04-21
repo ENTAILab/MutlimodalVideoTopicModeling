@@ -1,0 +1,439 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from src.asr.whisper_transcribe import transcribe_with_whisper
+from src.audio.speaker_embeddings import embed_segments
+from src.clustering.cluster import run_umap_hdbscan
+from src.config import ensure_dir, load_config
+from src.evaluation.metrics import compute_numeric_metrics
+from src.fusion.co_attention import co_attention_fuse, co_attention_fuse_multimodal
+from src.preprocess.audio_extractor import extract_wav
+from src.topic.bertopic_runner import encode_text_segments, run_bertopic
+from src.topic.summarize_local import summarize_topics_extractively
+from src.topic.topic_merge import reduce_similar_topics
+from src.utils import load_json, save_json, save_numpy
+from src.video.clip_embeddings import embed_frames_per_segment, to_segment_matrix
+from src.video.frame_selector import extract_segment_frames
+from src.visualization.timeline_plotly import build_timeline
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Video topic modeling prototype")
+    parser.add_argument("--video", default=None, help="Path to a single input video")
+    parser.add_argument("--video-dir", default="data", help="Directory to search for MP4 files")
+    parser.add_argument("--all-mp4", action="store_true", help="Process all MP4 files found under --video-dir")
+    parser.add_argument("--config", default="configs/default.yaml", help="Path to YAML config")
+    parser.add_argument(
+        "--stages",
+        default="audio,asr,speaker,frames,clip,visual_cluster,fusion,topic,merge,summary,metrics,viz",
+        help="Comma-separated stage list",
+    )
+    parser.add_argument("--output-dir", default=None, help="Optional output directory override")
+    return parser.parse_args()
+
+
+def apply_speaker_labels(segments: list[dict[str, Any]], labels: np.ndarray) -> None:
+    for seg, label in zip(segments, labels):
+        seg["speaker"] = "unknown" if int(label) == -1 else f"speaker_{int(label)}"
+
+
+def apply_topic_labels(segments: list[dict[str, Any]], topics: list[int]) -> None:
+    for seg, topic in zip(segments, topics):
+        seg["topic"] = int(topic)
+
+
+def _flatten_numeric(prefix: str, payload: Any, out: dict[str, float]) -> None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            nested = f"{prefix}.{key}" if prefix else str(key)
+            _flatten_numeric(nested, value, out)
+        return
+    if isinstance(payload, (int, float)) and not isinstance(payload, bool):
+        out[prefix] = float(payload)
+
+
+def _discover_videos(args: argparse.Namespace) -> list[Path]:
+    videos: list[Path] = []
+    if args.all_mp4:
+        root = Path(args.video_dir)
+        if not root.exists():
+            raise RuntimeError(f"Video directory not found: {root}")
+        videos = sorted(p for p in root.rglob("*") if p.is_file() and ".mp4" in p.name.lower())
+    elif args.video:
+        videos = [Path(args.video)]
+
+    if not videos:
+        raise RuntimeError("No videos found. Use --video <file> or --all-mp4 --video-dir <dir>.")
+
+    missing = [p for p in videos if not p.exists()]
+    if missing:
+        raise RuntimeError(f"Video file not found: {missing[0]}")
+
+    return videos
+
+
+def _aggregate_metrics(metric_payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    flattened: list[dict[str, float]] = []
+    for payload in metric_payloads:
+        row: dict[str, float] = {}
+        _flatten_numeric("", payload, row)
+        flattened.append(row)
+
+    keys = sorted({k for row in flattened for k in row.keys()})
+    mean: dict[str, float] = {}
+    summation: dict[str, float] = {}
+    for key in keys:
+        values = [row[key] for row in flattened if key in row]
+        if not values:
+            continue
+        mean[key] = float(np.mean(values))
+        if key.endswith("num_segments") or key.endswith("total_duration_s") or key.endswith("noise_segment_count"):
+            summation[key] = float(np.sum(values))
+
+    return {
+        "video_count": len(metric_payloads),
+        "mean": mean,
+        "sum": summation,
+    }
+
+
+def _run_video_pipeline(
+    video_path: Path,
+    cfg: Any,
+    stages: set[str],
+    output_root_override: Path | None,
+    is_batch: bool,
+) -> dict[str, Any]:
+    stem = video_path.stem
+
+    processed_root = Path(cfg.get("paths", "processed_dir", default="data/processed"))
+    output_root = output_root_override or Path(cfg.get("paths", "output_dir", default="data/output"))
+
+    processed_dir = processed_root / stem
+    if output_root_override is None:
+        output_dir = output_root / stem
+    else:
+        output_dir = (output_root / stem) if is_batch else output_root
+    ensure_dir(processed_dir)
+    ensure_dir(output_dir)
+
+    wav_path = processed_dir / "audio.wav"
+    segments_path = processed_dir / "segments.json"
+
+    segments: list[dict[str, Any]] = []
+
+    if "audio" in stages:
+        extract_wav(
+            video_path=video_path,
+            wav_path=wav_path,
+            sample_rate=int(cfg.get("audio", "sample_rate", default=16000)),
+            channels=int(cfg.get("audio", "channels", default=1)),
+            codec=str(cfg.get("audio", "codec", default="pcm_s16le")),
+        )
+
+    if "asr" in stages:
+        segments = transcribe_with_whisper(
+            wav_path=wav_path,
+            model_name=str(cfg.get("asr", "model_name", default="large-v3")),
+            device=str(cfg.get("asr", "device", default="cuda")),
+            language=cfg.get("asr", "language", default=None),
+        )
+        save_json(segments_path, segments)
+    else:
+        if segments_path.exists():
+            segments = load_json(segments_path)
+        else:
+            raise RuntimeError("ASR segments not found. Include stage 'asr' or provide segments.json.")
+
+    if not segments:
+        raise RuntimeError("No ASR segments found. Include stage 'asr' and verify audio content.")
+
+    if "speaker" in stages:
+        audio_vectors = embed_segments(
+            wav_path=wav_path,
+            segments=segments,
+            model_name=str(cfg.get("speaker", "model_name", default="pyannote/embedding")),
+            hf_token_env=str(cfg.get("speaker", "use_auth_token_env", default="HF_TOKEN")),
+            fallback_bins=int(cfg.get("speaker", "fallback_mfcc_bins", default=64)),
+        )
+        save_numpy(processed_dir / "audio_embeddings.npy", audio_vectors)
+
+        audio_cluster = run_umap_hdbscan(
+            audio_vectors,
+            umap_n_neighbors=int(cfg.get("cluster", "umap_n_neighbors", default=15)),
+            umap_n_components=int(cfg.get("cluster", "umap_n_components", default=8)),
+            umap_metric=str(cfg.get("cluster", "umap_metric", default="cosine")),
+            hdbscan_min_cluster_size=int(cfg.get("cluster", "hdbscan_min_cluster_size", default=5)),
+            hdbscan_metric=str(cfg.get("cluster", "hdbscan_metric", default="euclidean")),
+            random_state=cfg.seed,
+        )
+        apply_speaker_labels(segments, audio_cluster["labels"])
+        save_numpy(processed_dir / "audio_umap.npy", audio_cluster["reduced"])
+
+    segment_to_frames: dict[int, list[str]] = {}
+    if "frames" in stages:
+        segment_to_frames = extract_segment_frames(
+            video_path=video_path,
+            segments=segments,
+            out_dir=processed_dir / "frames",
+            top_k=int(cfg.get("frames", "top_k_per_segment", default=3)),
+            image_format=str(cfg.get("frames", "image_format", default="jpg")),
+            max_width=int(cfg.get("frames", "max_width", default=640)),
+        )
+        save_json(processed_dir / "segment_frames.json", segment_to_frames)
+
+    visual_vectors = None
+    if "clip" in stages:
+        if not segment_to_frames:
+            raise RuntimeError("No frames found. Include stage 'frames' before 'clip'.")
+        clip_backend = str(cfg.get("clip", "backend", default="clip"))
+        visual_map = embed_frames_per_segment(
+            segment_to_frames=segment_to_frames,
+            model_name=str(cfg.get("clip", "model_name", default="ViT-B-32")),
+            pretrained=str(cfg.get("clip", "pretrained", default="laion2b_s34b_b79k")),
+            device=str(cfg.get("clip", "device", default="cuda")),
+            backend=clip_backend,
+            vllm_base_url=str(cfg.get("clip", "vllm_base_url", default="http://localhost:8000/v1")),
+            vllm_endpoint=str(cfg.get("clip", "vllm_endpoint", default="/embeddings")),
+            vllm_model=str(cfg.get("clip", "vllm_model", default="Qwen/Qwen2.5-VL-7B-Instruct")),
+            vllm_api_key_env=cfg.get("clip", "vllm_api_key_env", default="VLLM_API_KEY"),
+            vllm_timeout_s=float(cfg.get("clip", "vllm_timeout_s", default=60.0)),
+            fallback_embedding_dim=int(cfg.get("clip", "fallback_embedding_dim", default=512)),
+        )
+        visual_vectors = to_segment_matrix(segments, visual_map)
+        save_numpy(processed_dir / "visual_embeddings.npy", visual_vectors)
+
+    if "visual_cluster" in stages and visual_vectors is not None:
+        visual_cluster = run_umap_hdbscan(
+            visual_vectors,
+            umap_n_neighbors=int(cfg.get("cluster", "umap_n_neighbors", default=15)),
+            umap_n_components=int(cfg.get("cluster", "umap_n_components", default=8)),
+            umap_metric=str(cfg.get("cluster", "umap_metric", default="cosine")),
+            hdbscan_min_cluster_size=int(cfg.get("cluster", "hdbscan_min_cluster_size", default=5)),
+            hdbscan_metric=str(cfg.get("cluster", "hdbscan_metric", default="euclidean")),
+            random_state=cfg.seed,
+        )
+        save_numpy(processed_dir / "visual_umap.npy", visual_cluster["reduced"])
+
+    if "fusion" in stages:
+        audio_vectors = np.load(processed_dir / "audio_embeddings.npy")
+        if visual_vectors is None:
+            visual_vectors = np.load(processed_dir / "visual_embeddings.npy")
+
+        fused = co_attention_fuse(
+            audio_vectors,
+            visual_vectors,
+            weight_audio=float(cfg.get("fusion", "weight_audio", default=0.5)),
+            weight_visual=float(cfg.get("fusion", "weight_visual", default=0.5)),
+        )
+        save_numpy(processed_dir / "fused_embeddings.npy", fused)
+
+        fused_cluster = run_umap_hdbscan(
+            fused,
+            umap_n_neighbors=int(cfg.get("cluster", "umap_n_neighbors", default=15)),
+            umap_n_components=int(cfg.get("cluster", "umap_n_components", default=8)),
+            umap_metric=str(cfg.get("cluster", "umap_metric", default="cosine")),
+            hdbscan_min_cluster_size=int(cfg.get("cluster", "hdbscan_min_cluster_size", default=5)),
+            hdbscan_metric=str(cfg.get("cluster", "hdbscan_metric", default="euclidean")),
+            random_state=cfg.seed,
+        )
+        save_numpy(processed_dir / "fused_umap.npy", fused_cluster["reduced"])
+
+    topic_model = None
+    topics: list[int] = []
+    topic_outputs: dict[str, dict[str, Any]] = {}
+    if "topic" in stages:
+        topic_mode = str(cfg.get("topic", "mode", default="unsupervised")).strip().lower()
+        topic_embedding_source = str(cfg.get("topic", "embedding_source", default="text")).strip().lower()
+        raw_seed_topics = cfg.get("topic", "seed_topic_list", default=[])
+        seed_topic_list = None
+        if topic_mode in {"guided", "semi-supervised", "semi_supervised"} and isinstance(raw_seed_topics, list) and raw_seed_topics:
+            seed_topic_list = raw_seed_topics
+
+        multimodal_embeddings = None
+        if topic_embedding_source in {"multimodal", "coattention", "co_attention", "both"}:
+            audio_vectors = np.load(processed_dir / "audio_embeddings.npy")
+            if visual_vectors is None:
+                visual_vectors = np.load(processed_dir / "visual_embeddings.npy")
+            text_vectors = encode_text_segments(
+                segments,
+                sentence_model_name=str(cfg.get("topic", "sentence_model", default="all-mpnet-base-v2")),
+            )
+            multimodal_embeddings = co_attention_fuse_multimodal(
+                text_vectors=text_vectors,
+                audio_vectors=audio_vectors,
+                visual_vectors=visual_vectors,
+                weight_text=float(cfg.get("topic", "weight_text", default=0.34)),
+                weight_audio=float(cfg.get("topic", "weight_audio", default=0.33)),
+                weight_visual=float(cfg.get("topic", "weight_visual", default=0.33)),
+            )
+            save_numpy(processed_dir / "multimodal_topic_embeddings.npy", multimodal_embeddings)
+
+        sources: list[tuple[str, np.ndarray | None]]
+        if topic_embedding_source == "both":
+            sources = [
+                ("text", None),
+                ("multimodal", multimodal_embeddings),
+            ]
+        elif topic_embedding_source in {"multimodal", "coattention", "co_attention"}:
+            sources = [("multimodal", multimodal_embeddings)]
+        else:
+            sources = [("text", None)]
+
+        for source_name, source_embeddings in sources:
+            source_model, source_topics, _ = run_bertopic(
+                segments,
+                sentence_model_name=str(cfg.get("topic", "sentence_model", default="all-mpnet-base-v2")),
+                min_topic_size=int(cfg.get("topic", "min_topic_size", default=5)),
+                seed_topic_list=seed_topic_list,
+                precomputed_embeddings=source_embeddings,
+            )
+            source_segments = [dict(seg) for seg in segments]
+            apply_topic_labels(source_segments, source_topics)
+
+            topic_info = source_model.get_topic_info().to_dict(orient="records")
+            suffix = "" if len(sources) == 1 else f"_{source_name}"
+            save_json(output_dir / f"topic_info{suffix}.json", topic_info)
+            save_json(output_dir / f"segments_enriched{suffix}.json", source_segments)
+
+            topic_outputs[source_name] = {
+                "topic_model": source_model,
+                "topics": source_topics,
+                "segments": source_segments,
+                "topic_info": topic_info,
+                "topic_info_path": str(output_dir / f"topic_info{suffix}.json"),
+            }
+
+        selected_source = "multimodal" if "multimodal" in topic_outputs else next(iter(topic_outputs.keys()))
+        topic_model = topic_outputs[selected_source]["topic_model"]
+        topics = topic_outputs[selected_source]["topics"]
+        segments = topic_outputs[selected_source]["segments"]
+
+    if "merge" in stages and topic_model is not None:
+        docs = [s["text"] for s in segments]
+        topic_model = reduce_similar_topics(topic_model, docs)
+        try:
+            merged = topic_model.get_topic_info().to_dict(orient="records")
+            save_json(output_dir / "topic_info_merged.json", merged)
+        except Exception:
+            pass
+
+    if "summary" in stages and topics:
+        summaries = summarize_topics_extractively(
+            segments,
+            topics,
+            max_sentences_per_topic=int(cfg.get("summary", "max_sentences_per_topic", default=4)),
+        )
+        save_json(output_dir / "topic_summaries.json", summaries)
+
+    if "topic" not in stages:
+        save_json(output_dir / "segments_enriched.json", segments)
+    else:
+        selected_segments = topic_outputs[selected_source]["segments"]
+        save_json(output_dir / "segments_enriched.json", selected_segments)
+        selected_topic_info = topic_outputs[selected_source]["topic_info"]
+        save_json(output_dir / "topic_info.json", selected_topic_info)
+
+    metric_files: dict[str, str] = {}
+    if "metrics" in stages:
+        if topic_outputs:
+            for source_name, payload in topic_outputs.items():
+                suffix = "" if len(topic_outputs) == 1 else f"_{source_name}"
+                metric_path = output_dir / f"metrics{suffix}.json"
+                metrics = compute_numeric_metrics(
+                    segments=payload["segments"],
+                    processed_dir=processed_dir,
+                    output_dir=output_dir,
+                    topic_info_override=payload["topic_info"],
+                )
+                save_json(metric_path, metrics)
+                metric_files[source_name] = str(metric_path)
+
+            if "text" in metric_files and "multimodal" in metric_files:
+                text_metrics = load_json(metric_files["text"])
+                multimodal_metrics = load_json(metric_files["multimodal"])
+                comparison = {
+                    "noise_ratio_delta_multimodal_minus_text": float(multimodal_metrics.get("noise_ratio", 0.0) - text_metrics.get("noise_ratio", 0.0)),
+                    "topic_coherence_npmi_delta_multimodal_minus_text": (
+                        None
+                        if text_metrics.get("topic_coherence_npmi") is None or multimodal_metrics.get("topic_coherence_npmi") is None
+                        else float(multimodal_metrics["topic_coherence_npmi"] - text_metrics["topic_coherence_npmi"])
+                    ),
+                    "topic_entropy_delta_multimodal_minus_text": float(
+                        multimodal_metrics.get("topic_entropy_normalized", 0.0)
+                        - text_metrics.get("topic_entropy_normalized", 0.0)
+                    ),
+                }
+                save_json(output_dir / "metrics_comparison.json", comparison)
+        else:
+            metric_path = output_dir / "metrics.json"
+            metrics = compute_numeric_metrics(
+                segments=segments,
+                processed_dir=processed_dir,
+                output_dir=output_dir,
+            )
+            save_json(metric_path, metrics)
+            metric_files["default"] = str(metric_path)
+
+    if "viz" in stages:
+        build_timeline(
+            segments,
+            out_html=output_dir / "timeline.html",
+            title=str(cfg.get("visualization", "timeline_title", default="Topic Timeline by Speaker")),
+            processed_dir=processed_dir,
+            output_dir=output_dir,
+        )
+
+    return {
+        "video": str(video_path),
+        "stem": stem,
+        "output_dir": str(output_dir),
+        "metrics_files": metric_files,
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = load_config(args.config)
+    stages = {s.strip() for s in args.stages.split(",") if s.strip()}
+    videos = _discover_videos(args)
+    is_batch = args.all_mp4 or len(videos) > 1
+    output_root_override = Path(args.output_dir) if args.output_dir else None
+
+    runs: list[dict[str, Any]] = []
+    for video_path in videos:
+        run_info = _run_video_pipeline(
+            video_path=video_path,
+            cfg=cfg,
+            stages=stages,
+            output_root_override=output_root_override,
+            is_batch=is_batch,
+        )
+        runs.append(run_info)
+
+    if "metrics" in stages and runs:
+        output_root = output_root_override or Path(cfg.get("paths", "output_dir", default="data/output"))
+        per_source_metrics: dict[str, list[dict[str, Any]]] = {}
+        for run in runs:
+            for source_name, metric_file in run.get("metrics_files", {}).items():
+                payload = load_json(metric_file)
+                per_source_metrics.setdefault(source_name, []).append(payload)
+
+        aggregate = {
+            "video_count": len(runs),
+            "videos": [{"stem": run["stem"], "output_dir": run["output_dir"]} for run in runs],
+            "sources": {},
+        }
+        for source_name, payloads in per_source_metrics.items():
+            aggregate["sources"][source_name] = _aggregate_metrics(payloads)
+
+        save_json(output_root / "metrics_all_videos.json", aggregate)
+
+
+if __name__ == "__main__":
+    main()

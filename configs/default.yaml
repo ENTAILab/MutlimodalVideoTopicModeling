@@ -1,0 +1,91 @@
+seed: 42
+
+paths:
+  processed_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/processed
+  output_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/output
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  codec: pcm_s16le
+
+asr:
+  # model_name: large-v3
+  model_name: medium
+  device: cuda
+  compute_type: float16
+  language: null
+  vad_filter: false
+
+speaker:
+  model_name: pyannote/embedding
+  use_auth_token_env: HF_TOKEN
+  fallback_mfcc_bins: 64
+
+frames:
+  top_k_per_segment: 3
+  image_format: jpg
+  max_width: 640
+
+clip:
+  # backend: clip | vllm_api
+  backend: clip
+  model_name: ViT-B-32
+  pretrained: laion2b_s34b_b79k
+  device: cuda:1
+  fallback_embedding_dim: 512
+
+  # Used only when backend=vllm_api
+  vllm_base_url: http://localhost:8000/v1
+  vllm_endpoint: /embeddings
+  vllm_model: Qwen/Qwen2.5-VL-7B-Instruct
+  vllm_api_key_env: VLLM_API_KEY
+  vllm_timeout_s: 60
+
+cluster:
+  umap_n_neighbors: 15
+  umap_n_components: 8
+  umap_metric: cosine
+  hdbscan_min_cluster_size: 5
+  hdbscan_metric: euclidean
+
+fusion:
+  weight_audio: 0.8
+  weight_visual: 0.2
+
+topic:
+  sentence_model: all-mpnet-base-v2
+  min_topic_size: 5
+  merge_similarity_threshold: 0.85
+  # embedding_source: text | multimodal | both
+  embedding_source: both
+  weight_text: 0.34
+  weight_audio: 0.33
+  weight_visual: 0.33
+  # mode: unsupervised
+  # seed_topic_list: []
+
+  # guided/semi-supervised setup:
+  mode: guided
+  seed_topic_list:
+    - ["war", "conflict", "battle", "army"]
+    - ["democracy", "freedom", "election", "parliament"]
+    - ["peace", "reconciliation", "memory", "history"]
+    - ["economy", "trade", "market", "growth"]
+    - ["climate", "environment", "sustainability", "green"]
+    - ["technology", "innovation", "digital", "future"]
+    - ["health", "medicine", "pandemic", "vaccine"]
+    - ["culture", "art", "music", "literature"]
+    - ["sports", "competition", "athlete", "tournament"]
+    - ["education", "school", "university", "learning"]
+    - ["human rights", "justice", "equality", "activism"]
+    - ["migration", "refugee", "border", "asylum"]
+    - ["science", "research", "discovery", "experiment"]
+    - ["space", "astronomy", "exploration", "universe"]
+    - ["leadership", "governance", "policy", "diplomacy"]
+
+summary:
+  max_sentences_per_topic: 4
+
+visualization:
+  timeline_title: "Topic Timeline by Speaker"
