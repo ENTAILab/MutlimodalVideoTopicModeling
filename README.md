@@ -6,44 +6,134 @@ This repository contains a research prototype pipeline for multimodal video topi
 
 ```mermaid
 flowchart LR
-  A[Video file] --> B[WAV extraction]
-  B --> C[Whisper ASR]
-  C --> D[Transcript segments]
-  D --> E[Audio embeddings]
-  D --> F[Frame sampling]
-  F --> G[CLIP visual embeddings]
-  E --> H[Speaker clustering]
-  G --> I[Visual clustering]
-  E --> J[Co-attention fusion]
-  G --> J
-  J --> K[Fused clustering]
-  D --> L[BERTopic]
-  L --> M[Topic merge]
-  L --> N[Topic summaries]
-  D --> O[Enriched segments]
-  M --> P[Interactive timeline dashboard]
-  N --> P
-  O --> P
-  F --> P
+  A[Input video] --> B[Audio extraction]
+  B --> C[Whisper ASR + timestamps]
+  C --> D[Segment records]
+
+  D --> E[Speaker embeddings]
+  E --> F[UMAP + HDBSCAN speaker labels]
+
+  D --> G[Frame candidate sampling]
+  G --> H[Representative frame ranker]
+  H --> I[Top-k non-duplicate frames]
+  I --> J[Visual embeddings]
+  J --> K[Visual clustering]
+
+  E --> L[Audio-Visual co-attention fusion]
+  J --> L
+  L --> M[Fused clustering]
+
+  D --> N[BERTopic]
+  L --> N
+  N --> O[Topic merge]
+  O --> P[Topic summaries]
+  O --> Q[Enriched segments]
+
+  F --> R[Timeline + cards]
+  I --> R
+  Q --> R
+  P --> R
 ```
 
 The pipeline is intentionally modular: transcription, audio/visual embeddings, clustering, topic extraction, topic summarization, and visualization are all separate stages so you can rerun only the slices you need.
 
-## Pipeline stages
+## Frame Selection and Ranking Flow
 
-1. Extract WAV audio from video.
-2. Transcribe speech segments with Whisper (`large-v3`) and timestamps.
-3. Generate per-segment audio embeddings with `pyannote/embedding` (with MFCC fallback).
-4. Run UMAP + HDBSCAN for speaker/event clustering.
-5. Extract top-k representative frames per ASR segment.
-6. Generate CLIP visual embeddings for each segment.
-7. Apply UMAP + HDBSCAN to visual and fused embeddings.
-8. Fuse audio+visual embeddings with an unsupervised co-attention-style strategy.
-9. Run BERTopic over transcript segments, either unsupervised or guided with seed topics.
-10. Reduce micro-topics and keep merged topic outputs.
-11. Summarize topics locally (extractive).
-12. Compute numeric evaluation metrics.
-13. Render Plotly timeline by speaker and topic.
+```mermaid
+flowchart TD
+  A[ASR segment start/end] --> B[Sample many candidate timestamps]
+  B --> C[Decode candidate frames]
+  C --> D[Build frame features texture + color hist]
+  C --> E[Compute sharpness score]
+  D --> F[MMR-style ranker]
+  E --> F
+  A --> F
+  F --> G[Dedup filter by cosine threshold]
+  G --> H[Keep top_k representative frames]
+  H --> I[Write segment_frames.json + image files]
+```
+
+Notes for the new ranker stage:
+
+- The frame stage now samples a candidate pool first, then ranks and deduplicates.
+- `top_k_per_segment` is the final number kept per segment, not just the number sampled.
+- Candidate pool size is controlled by:
+  - `frames.candidate_multiplier`
+  - `frames.min_candidate_frames`
+- Duplicate suppression is controlled by:
+  - `frames.dedup_similarity_threshold`
+- Diversity vs representativeness trade-off is controlled by:
+  - `frames.diversity_lambda`
+
+## Topic Mode Branching
+
+```mermaid
+flowchart LR
+  A[Segments text] --> B[Text embeddings]
+  C[Audio embeddings] --> D[Tri-modal co-attention]
+  E[Visual embeddings] --> D
+  B --> D
+
+  B --> F[BERTopic text mode]
+  D --> G[BERTopic multimodal mode]
+
+  F --> H[topic_info_text.json]
+  G --> I[topic_info_multimodal.json]
+  H --> J[Comparison metrics]
+  I --> J
+```
+
+## Pipeline Stages (Detailed)
+
+1. Audio extraction (`audio`)
+  - Converts video to mono PCM WAV with configurable sample rate and codec.
+  - Output: `data/processed/<video>/audio.wav`.
+
+2. ASR segmentation (`asr`)
+  - Runs Whisper and produces timestamped transcript segments.
+  - Output: `segments.json` with `segment_id`, `start_s`, `end_s`, and text.
+
+3. Speaker representation + clustering (`speaker`)
+  - Builds segment-level speaker embeddings (pyannote, with fallback behavior).
+  - Clusters via UMAP + HDBSCAN and attaches speaker labels.
+  - Outputs include `audio_embeddings.npy` and `audio_umap.npy`.
+
+4. Candidate frame extraction + ranking (`frames`)
+  - Samples candidate timestamps per segment.
+  - Extracts candidate frames, computes features, and scores representativeness.
+  - Removes near-duplicates using cosine similarity thresholding.
+  - Persists only final top-k representative frames per segment.
+  - Outputs: `frames/` and `segment_frames.json`.
+
+5. Visual embedding (`clip`)
+  - Encodes selected representative frames with OpenCLIP or a vLLM API.
+  - Averages frame embeddings to one segment-level visual vector.
+  - Output: `visual_embeddings.npy`.
+
+6. Visual clustering (`visual_cluster`)
+  - Applies UMAP + HDBSCAN on visual embeddings.
+  - Output: `visual_umap.npy`.
+
+7. Audio-visual fusion (`fusion`)
+  - Performs weighted co-attention-style fusion.
+  - Output: `fused_embeddings.npy` and `fused_umap.npy`.
+
+8. Topic modeling (`topic`)
+  - Supports `text`, `multimodal`, or `both` embedding-source modes.
+  - Supports `unsupervised` and `guided` topic mode.
+  - Outputs mode-specific topic files and enriched segment files.
+
+9. Topic reduction + summaries (`merge`, `summary`)
+  - Reduces semantically similar micro-topics.
+  - Generates extractive summaries per merged topic.
+
+10. Evaluation (`metrics`)
+  - Computes structural, lexical, transition, coherence, and clustering metrics.
+  - Produces mode-specific metrics when running both text and multimodal topic spaces.
+
+11. Visualization (`viz`)
+  - Builds interactive timeline/cards with speaker, topic, summaries, and selected frames.
+  - Output: `timeline.html`.
 
 ## Setup
 

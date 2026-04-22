@@ -182,6 +182,10 @@ def _run_video_pipeline(
             segments=segments,
             out_dir=processed_dir / "frames",
             top_k=int(cfg.get("frames", "top_k_per_segment", default=3)),
+            candidate_multiplier=int(cfg.get("frames", "candidate_multiplier", default=4)),
+            min_candidate_frames=int(cfg.get("frames", "min_candidate_frames", default=8)),
+            dedup_similarity_threshold=float(cfg.get("frames", "dedup_similarity_threshold", default=0.96)),
+            diversity_lambda=float(cfg.get("frames", "diversity_lambda", default=0.35)),
             image_format=str(cfg.get("frames", "image_format", default="jpg")),
             max_width=int(cfg.get("frames", "max_width", default=640)),
         )

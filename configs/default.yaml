@@ -24,6 +24,10 @@ speaker:
 
 frames:
   top_k_per_segment: 3
+  candidate_multiplier: 4
+  min_candidate_frames: 8
+  dedup_similarity_threshold: 0.96
+  diversity_lambda: 0.35
   image_format: jpg
   max_width: 640
 
