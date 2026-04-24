@@ -63,7 +63,17 @@ def _discover_videos(args: argparse.Namespace) -> list[Path]:
         root = Path(args.video_dir)
         if not root.exists():
             raise RuntimeError(f"Video directory not found: {root}")
-        videos = sorted(p for p in root.rglob("*") if p.is_file() and ".mp4" in p.name.lower())
+        root = root.resolve()
+        # Scan only one level deep: root/*.mp4 and root/*/*.mp4.
+        direct_files = [p for p in root.glob("*.mp4") if p.is_file()]
+        nested_files = [
+            p
+            for child in root.iterdir()
+            if child.is_dir()
+            for p in child.glob("*.mp4")
+            if p.is_file()
+        ]
+        videos = sorted(direct_files + nested_files)
     elif args.video:
         videos = [Path(args.video)]
 
@@ -75,6 +85,48 @@ def _discover_videos(args: argparse.Namespace) -> list[Path]:
         raise RuntimeError(f"Video file not found: {missing[0]}")
 
     return videos
+
+
+def _run_stem_for_video(video_path: Path, args: argparse.Namespace) -> str:
+    stem = video_path.stem
+    if not args.all_mp4:
+        return stem
+
+    root = Path(args.video_dir).resolve()
+    video_resolved = video_path.resolve()
+    parent = video_resolved.parent
+
+    # If discovered from an immediate subfolder, prefix parent folder name.
+    if parent != root and parent.parent == root:
+        return f"{parent.name}_{stem}"
+    return stem
+
+
+def _is_already_processed(
+    run_stem: str,
+    cfg: Any,
+    output_root_override: Path | None,
+    is_batch: bool,
+) -> bool:
+    processed_root = Path(cfg.get("paths", "processed_dir", default="data/processed"))
+    output_root = output_root_override or Path(cfg.get("paths", "output_dir", default="data/output"))
+
+    processed_dir = processed_root / run_stem
+    if output_root_override is None:
+        output_dir = output_root / run_stem
+    else:
+        output_dir = (output_root / run_stem) if is_batch else output_root
+
+    markers = [
+        output_dir / "segments_enriched.json",
+        output_dir / "topic_info.json",
+        output_dir / "metrics.json",
+        output_dir / "metrics_text.json",
+        output_dir / "metrics_multimodal.json",
+        output_dir / "timeline.html",
+        processed_dir / "segments.json",
+    ]
+    return any(marker.exists() for marker in markers)
 
 
 def _aggregate_metrics(metric_payloads: list[dict[str, Any]]) -> dict[str, Any]:
@@ -104,12 +156,13 @@ def _aggregate_metrics(metric_payloads: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _run_video_pipeline(
     video_path: Path,
+    run_stem: str,
     cfg: Any,
     stages: set[str],
     output_root_override: Path | None,
     is_batch: bool,
 ) -> dict[str, Any]:
-    stem = video_path.stem
+    stem = run_stem
 
     processed_root = Path(cfg.get("paths", "processed_dir", default="data/processed"))
     output_root = output_root_override or Path(cfg.get("paths", "output_dir", default="data/output"))
@@ -411,8 +464,19 @@ def main() -> None:
 
     runs: list[dict[str, Any]] = []
     for video_path in videos:
+        run_stem = _run_stem_for_video(video_path, args)
+        if _is_already_processed(
+            run_stem=run_stem,
+            cfg=cfg,
+            output_root_override=output_root_override,
+            is_batch=is_batch,
+        ):
+            print(f"[SKIP] Already processed: {video_path} (run stem: {run_stem})")
+            continue
+
         run_info = _run_video_pipeline(
             video_path=video_path,
+            run_stem=run_stem,
             cfg=cfg,
             stages=stages,
             output_root_override=output_root_override,
