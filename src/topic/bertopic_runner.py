@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+# from pyarrow import cuda
 
 if TYPE_CHECKING:
     from bertopic import BERTopic
@@ -14,6 +15,7 @@ def run_bertopic(
     min_topic_size: int = 5,
     seed_topic_list: list[list[str]] | None = None,
     precomputed_embeddings: np.ndarray | None = None,
+    device: str = "cuda",
 ) -> tuple[BERTopic, list[int], list[list[float]]]:
     try:
         from bertopic import BERTopic
@@ -42,7 +44,7 @@ def run_bertopic(
     guided_seed_topic_list = seed_topic_list or None
     embedding_model = None
     if precomputed_embeddings is None:
-        embedding_model = SentenceTransformer(sentence_model_name)
+        embedding_model = SentenceTransformer(sentence_model_name, device=device)
 
     topic_model = BERTopic(
         embedding_model=embedding_model,
@@ -62,10 +64,11 @@ def run_bertopic(
 def encode_text_segments(
     segments: list[dict[str, Any]],
     sentence_model_name: str = "all-mpnet-base-v2",
+    device: str = "cuda",
 ) -> np.ndarray:
     from sentence_transformers import SentenceTransformer
 
     docs = [str(seg.get("text", "")).strip() or "[EMPTY]" for seg in segments]
-    model = SentenceTransformer(sentence_model_name)
+    model = SentenceTransformer(sentence_model_name, device=device)
     embeddings = model.encode(docs, show_progress_bar=False, convert_to_numpy=True)
     return np.asarray(embeddings, dtype=np.float32)

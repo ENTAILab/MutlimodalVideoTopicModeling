@@ -1,8 +1,8 @@
 seed: 42
 
 paths:
-  processed_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/processed
-  output_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/output
+  processed_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/processed_large
+  output_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/output_large
 
 audio:
   sample_rate: 16000
@@ -10,9 +10,9 @@ audio:
   codec: pcm_s16le
 
 asr:
-  # model_name: large-v3
-  model_name: medium
-  device: cuda
+  # model_name: large-v3 / medium
+  model_name: large-v3
+  device: cuda:1
   compute_type: float16
   language: null
   vad_filter: false
@@ -23,10 +23,10 @@ speaker:
   fallback_mfcc_bins: 64
 
 frames:
-  top_k_per_segment: 3
+  top_k_per_segment: 5
   candidate_multiplier: 4
   min_candidate_frames: 8
-  dedup_similarity_threshold: 0.96
+  dedup_similarity_threshold: 0.84
   diversity_lambda: 0.35
   image_format: jpg
   max_width: 640
@@ -37,7 +37,7 @@ clip:
   model_name: ViT-B-32
   pretrained: laion2b_s34b_b79k
   device: cuda:1
-  fallback_embedding_dim: 512
+  fallback_embedding_dim: 768
 
   # Used only when backend=vllm_api
   vllm_base_url: http://localhost:8000/v1
@@ -54,18 +54,19 @@ cluster:
   hdbscan_metric: euclidean
 
 fusion:
-  weight_audio: 0.8
-  weight_visual: 0.2
+  weight_audio: 0.5
+  weight_visual: 0.5
 
 topic:
   sentence_model: all-mpnet-base-v2
   min_topic_size: 5
-  merge_similarity_threshold: 0.85
+  merge_similarity_threshold: 0.70
   # embedding_source: text | multimodal | both
   embedding_source: both
   weight_text: 0.34
   weight_audio: 0.33
   weight_visual: 0.33
+  sentence_model_device: cuda:1
   # mode: unsupervised
   # seed_topic_list: []
 

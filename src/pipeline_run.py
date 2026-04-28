@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +105,7 @@ def _run_stem_for_video(video_path: Path, args: argparse.Namespace) -> str:
 
 def _is_already_processed(
     run_stem: str,
+    stages: set[str],
     cfg: Any,
     output_root_override: Path | None,
     is_batch: bool,
@@ -117,23 +119,68 @@ def _is_already_processed(
     else:
         output_dir = (output_root / run_stem) if is_batch else output_root
 
-    markers = [
-        output_dir / "segments_enriched.json",
-        output_dir / "topic_info.json",
-        output_dir / "metrics.json",
-        output_dir / "metrics_text.json",
-        output_dir / "metrics_multimodal.json",
-        output_dir / "timeline.html",
-        processed_dir / "segments.json",
-    ]
-    return any(marker.exists() for marker in markers)
+    markers: list[Path] = []
+    if "audio" in stages:
+        markers.append(processed_dir / "audio.wav")
+    if "asr" in stages:
+        markers.append(processed_dir / "segments.json")
+    if "speaker" in stages:
+        markers.extend(
+            [
+                processed_dir / "audio_embeddings.npy",
+                processed_dir / "audio_umap.npy",
+            ]
+        )
+    if "frames" in stages:
+        markers.append(processed_dir / "segment_frames.json")
+    if "clip" in stages:
+        markers.append(processed_dir / "visual_embeddings.npy")
+    if "visual_cluster" in stages:
+        markers.append(processed_dir / "visual_umap.npy")
+    if "fusion" in stages:
+        markers.extend(
+            [
+                processed_dir / "fused_embeddings.npy",
+                processed_dir / "fused_umap.npy",
+            ]
+        )
+    if "topic" in stages:
+        markers.extend(
+            [
+                output_dir / "segments_enriched.json",
+                output_dir / "topic_info.json",
+            ]
+        )
+    if "merge" in stages:
+        markers.append(output_dir / "topic_info_merged.json")
+    if "summary" in stages:
+        markers.append(output_dir / "topic_summaries.json")
+    if "metrics" in stages:
+        topic_embedding_source = str(cfg.get("topic", "embedding_source", default="text")).strip().lower()
+        if "topic" in stages and topic_embedding_source == "both":
+            markers.extend(
+                [
+                    output_dir / "metrics_text.json",
+                    output_dir / "metrics_multimodal.json",
+                    output_dir / "metrics_comparison.json",
+                ]
+            )
+        else:
+            markers.append(output_dir / "metrics.json")
+    if "viz" in stages:
+        markers.append(output_dir / "timeline.html")
+
+    if not markers:
+        return False
+    return all(marker.exists() for marker in markers)
 
 
 def _aggregate_metrics(metric_payloads: list[dict[str, Any]]) -> dict[str, Any]:
     flattened: list[dict[str, float]] = []
     for payload in metric_payloads:
+        metric_values = payload.get("metrics", payload) if isinstance(payload, dict) else payload
         row: dict[str, float] = {}
-        _flatten_numeric("", payload, row)
+        _flatten_numeric("", metric_values, row)
         flattened.append(row)
 
     keys = sorted({k for row in flattened for k in row.keys()})
@@ -154,6 +201,31 @@ def _aggregate_metrics(metric_payloads: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _metrics_with_context(
+    metrics: dict[str, Any],
+    *,
+    timestamp_utc: str,
+    config_path: str,
+    cfg: Any,
+    video_path: Path,
+    run_stem: str,
+    source_name: str,
+    stages: set[str],
+) -> dict[str, Any]:
+    return {
+        "meta": {
+            "timestamp_utc": timestamp_utc,
+            "config_path": config_path,
+            "config": cfg.raw,
+            "video": str(video_path),
+            "run_stem": run_stem,
+            "source": source_name,
+            "stages": sorted(stages),
+        },
+        "metrics": metrics,
+    }
+
+
 def _run_video_pipeline(
     video_path: Path,
     run_stem: str,
@@ -161,9 +233,14 @@ def _run_video_pipeline(
     stages: set[str],
     output_root_override: Path | None,
     is_batch: bool,
+    timestamp_utc: str,
+    config_path: str,
 ) -> dict[str, Any]:
     stem = run_stem
-
+    # if path contains 2026-03-22 skip it
+    # if "2026-03-22" in video_path.as_posix() or "2026-04-09" in video_path.as_posix():
+    #     print(f"Skipping video: {video_path}")
+    #     return {}
     processed_root = Path(cfg.get("paths", "processed_dir", default="data/processed"))
     output_root = output_root_override or Path(cfg.get("paths", "output_dir", default="data/output"))
 
@@ -320,6 +397,7 @@ def _run_video_pipeline(
             text_vectors = encode_text_segments(
                 segments,
                 sentence_model_name=str(cfg.get("topic", "sentence_model", default="all-mpnet-base-v2")),
+                device=str(cfg.get("topic", "sentence_model_device", default="cuda")),
             )
             multimodal_embeddings = co_attention_fuse_multimodal(
                 text_vectors=text_vectors,
@@ -346,9 +424,10 @@ def _run_video_pipeline(
             source_model, source_topics, _ = run_bertopic(
                 segments,
                 sentence_model_name=str(cfg.get("topic", "sentence_model", default="all-mpnet-base-v2")),
-                min_topic_size=int(cfg.get("topic", "min_topic_size", default=5)),
+                min_topic_size=int(cfg.get("topic   ", "min_topic_size", default=5)),
                 seed_topic_list=seed_topic_list,
                 precomputed_embeddings=source_embeddings,
+                device=str(cfg.get("topic", "sentence_model_device", default="cuda")),
             )
             source_segments = [dict(seg) for seg in segments]
             apply_topic_labels(source_segments, source_topics)
@@ -408,12 +487,24 @@ def _run_video_pipeline(
                     output_dir=output_dir,
                     topic_info_override=payload["topic_info"],
                 )
-                save_json(metric_path, metrics)
+                metric_payload = _metrics_with_context(
+                    metrics,
+                    timestamp_utc=timestamp_utc,
+                    config_path=config_path,
+                    cfg=cfg,
+                    video_path=video_path,
+                    run_stem=run_stem,
+                    source_name=source_name,
+                    stages=stages,
+                )
+                save_json(metric_path, metric_payload)
                 metric_files[source_name] = str(metric_path)
 
             if "text" in metric_files and "multimodal" in metric_files:
-                text_metrics = load_json(metric_files["text"])
-                multimodal_metrics = load_json(metric_files["multimodal"])
+                text_payload = load_json(metric_files["text"])
+                multimodal_payload = load_json(metric_files["multimodal"])
+                text_metrics = text_payload.get("metrics", text_payload)
+                multimodal_metrics = multimodal_payload.get("metrics", multimodal_payload)
                 comparison = {
                     "noise_ratio_delta_multimodal_minus_text": float(multimodal_metrics.get("noise_ratio", 0.0) - text_metrics.get("noise_ratio", 0.0)),
                     "topic_coherence_npmi_delta_multimodal_minus_text": (
@@ -434,7 +525,17 @@ def _run_video_pipeline(
                 processed_dir=processed_dir,
                 output_dir=output_dir,
             )
-            save_json(metric_path, metrics)
+            metric_payload = _metrics_with_context(
+                metrics,
+                timestamp_utc=timestamp_utc,
+                config_path=config_path,
+                cfg=cfg,
+                video_path=video_path,
+                run_stem=run_stem,
+                source_name="default",
+                stages=stages,
+            )
+            save_json(metric_path, metric_payload)
             metric_files["default"] = str(metric_path)
 
     if "viz" in stages:
@@ -457,6 +558,8 @@ def _run_video_pipeline(
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
+    config_path = str(Path(args.config).resolve())
+    timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     stages = {s.strip() for s in args.stages.split(",") if s.strip()}
     videos = _discover_videos(args)
     is_batch = args.all_mp4 or len(videos) > 1
@@ -467,6 +570,7 @@ def main() -> None:
         run_stem = _run_stem_for_video(video_path, args)
         if _is_already_processed(
             run_stem=run_stem,
+            stages=stages,
             cfg=cfg,
             output_root_override=output_root_override,
             is_batch=is_batch,
@@ -481,6 +585,8 @@ def main() -> None:
             stages=stages,
             output_root_override=output_root_override,
             is_batch=is_batch,
+            timestamp_utc=timestamp_utc,
+            config_path=config_path,
         )
         runs.append(run_info)
 
@@ -493,14 +599,22 @@ def main() -> None:
                 per_source_metrics.setdefault(source_name, []).append(payload)
 
         aggregate = {
+            "meta": {
+                "timestamp_utc": timestamp_utc,
+                "config_path": config_path,
+                "config": cfg.raw,
+                "stages": sorted(stages),
+            },
             "video_count": len(runs),
-            "videos": [{"stem": run["stem"], "output_dir": run["output_dir"]} for run in runs],
+            "videos": [{"stem": run["stem"], "output_dir": run["output_dir"]} for run in runs if run.get("stem") and run.get("output_dir")],
             "sources": {},
         }
         for source_name, payloads in per_source_metrics.items():
             aggregate["sources"][source_name] = _aggregate_metrics(payloads)
 
         save_json(output_root / "metrics_all_videos.json", aggregate)
+        safe_timestamp = timestamp_utc.replace(":", "-")
+        save_json(output_root / f"metrics_all_videos_{safe_timestamp}.json", aggregate)
 
 
 if __name__ == "__main__":
