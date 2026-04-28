@@ -57,7 +57,32 @@ def run_bertopic(
     if precomputed_embeddings is not None and precomputed_embeddings.shape[0] != len(docs):
         raise ValueError("precomputed_embeddings rows must match number of segments")
 
-    topics, probs = topic_model.fit_transform(docs, embeddings=precomputed_embeddings)
+    try:
+        topics, probs = topic_model.fit_transform(docs, embeddings=precomputed_embeddings)
+    except ValueError as exc:
+        message = str(exc).lower()
+        if "after pruning, no terms remain" not in message:
+            raise
+
+        # Fallback for sparse or repetitive corpora where stopwords/max_df remove all terms.
+        fallback_vectorizer = CountVectorizer(
+            stop_words=None,
+            ngram_range=(1, 1),
+            min_df=1,
+            max_df=1.0,
+            token_pattern=r"(?u)\b\w+\b",
+        )
+        fallback_ctfidf = ClassTfidfTransformer(reduce_frequent_words=False)
+        topic_model = BERTopic(
+            embedding_model=embedding_model,
+            vectorizer_model=fallback_vectorizer,
+            ctfidf_model=fallback_ctfidf,
+            seed_topic_list=guided_seed_topic_list,
+            min_topic_size=min_topic_size,
+            verbose=False,
+        )
+        topics, probs = topic_model.fit_transform(docs, embeddings=precomputed_embeddings)
+
     return topic_model, topics, probs
 
 

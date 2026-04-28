@@ -238,9 +238,9 @@ def _run_video_pipeline(
 ) -> dict[str, Any]:
     stem = run_stem
     # if path contains 2026-03-22 skip it
-    # if "2026-03-22" in video_path.as_posix() or "2026-04-09" in video_path.as_posix():
-    #     print(f"Skipping video: {video_path}")
-    #     return {}
+    if "2026-03-22" in video_path.as_posix() or "2026-04-09" in video_path.as_posix() or "2026-03-30" in video_path.as_posix():
+        print(f"Skipping video: {video_path}")
+        return {}
     processed_root = Path(cfg.get("paths", "processed_dir", default="data/processed"))
     output_root = output_root_override or Path(cfg.get("paths", "output_dir", default="data/output"))
 
