@@ -1,8 +1,8 @@
 seed: 42
 
 paths:
-  processed_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/processed_large
-  output_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/output_large
+  processed_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/processed
+  output_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/output
 
 audio:
   sample_rate: 16000
@@ -11,15 +11,21 @@ audio:
 
 asr:
   # model_name: large-v3 / medium
-  model_name: large-v3
-  device: cuda:1
+  model_name: medium
+  device: cuda:0
   compute_type: float16
   language: null
   vad_filter: false
+  skip_existing: true
 
 speaker:
+  # backend: pyannote_fallback | clap
+  backend: clap
   model_name: pyannote/embedding
   use_auth_token_env: HF_TOKEN
+  clap_model_name: laion/clap-htsat-unfused
+  clap_device: cuda:0
+  clap_sampling_rate: 48000
   fallback_mfcc_bins: 64
 
 frames:
@@ -36,7 +42,7 @@ clip:
   backend: clip
   model_name: ViT-B-32
   pretrained: laion2b_s34b_b79k
-  device: cuda:1
+  device: cuda:0
   fallback_embedding_dim: 768
 
   # Used only when backend=vllm_api
@@ -65,8 +71,9 @@ topic:
   embedding_source: both
   weight_text: 0.34
   weight_audio: 0.33
+  # weight_audio: 0.0
   weight_visual: 0.33
-  sentence_model_device: cuda:1
+  sentence_model_device: cuda:0
   # mode: unsupervised
   # seed_topic_list: []
 

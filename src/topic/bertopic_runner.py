@@ -32,8 +32,17 @@ def run_bertopic(
 
     docs = [str(seg.get("text", "")).strip() or "[EMPTY]" for seg in segments]
     doc_count = len(docs)
-    min_df = 1 if doc_count < 10 else 1
-    max_df = 1.0 if doc_count < 10 else 0.95
+
+    # Ensure min_df / max_df are compatible for small corpora.
+    # Use integer min_df=1 by default. Use a float max_df for larger corpora
+    # but guard that max_df * doc_count >= min_df.
+    min_df = 1
+    preferred_max_df = 0.95 if doc_count >= 10 else 1.0
+    if isinstance(preferred_max_df, float) and doc_count > 0 and preferred_max_df * doc_count < min_df:
+        max_df = 1.0
+    else:
+        max_df = preferred_max_df
+
     vectorizer_model = CountVectorizer(
         stop_words="english",
         ngram_range=(1, 2),
@@ -61,27 +70,35 @@ def run_bertopic(
         topics, probs = topic_model.fit_transform(docs, embeddings=precomputed_embeddings)
     except ValueError as exc:
         message = str(exc).lower()
-        if "after pruning, no terms remain" not in message:
+        # Handle common vectorizer pruning errors including max_df/min_df mismatches
+        # and the "after pruning, no terms remain" case by falling back to a
+        # minimal vectorizer configuration.
+        if (
+            "after pruning, no terms remain" in message
+            or "max_df corresponds to" in message
+            or "max_df is <= min_df" in message
+            or "max_df .* < min_df" in message
+        ):
+            # Fallback for sparse or repetitive corpora where stopwords/max_df remove all terms.
+            fallback_vectorizer = CountVectorizer(
+                stop_words=None,
+                ngram_range=(1, 1),
+                min_df=1,
+                max_df=1.0,
+                token_pattern=r"(?u)\b\w+\b",
+            )
+            fallback_ctfidf = ClassTfidfTransformer(reduce_frequent_words=False)
+            topic_model = BERTopic(
+                embedding_model=embedding_model,
+                vectorizer_model=fallback_vectorizer,
+                ctfidf_model=fallback_ctfidf,
+                seed_topic_list=guided_seed_topic_list,
+                min_topic_size=min_topic_size,
+                verbose=False,
+            )
+            topics, probs = topic_model.fit_transform(docs, embeddings=precomputed_embeddings)
+        else:
             raise
-
-        # Fallback for sparse or repetitive corpora where stopwords/max_df remove all terms.
-        fallback_vectorizer = CountVectorizer(
-            stop_words=None,
-            ngram_range=(1, 1),
-            min_df=1,
-            max_df=1.0,
-            token_pattern=r"(?u)\b\w+\b",
-        )
-        fallback_ctfidf = ClassTfidfTransformer(reduce_frequent_words=False)
-        topic_model = BERTopic(
-            embedding_model=embedding_model,
-            vectorizer_model=fallback_vectorizer,
-            ctfidf_model=fallback_ctfidf,
-            seed_topic_list=guided_seed_topic_list,
-            min_topic_size=min_topic_size,
-            verbose=False,
-        )
-        topics, probs = topic_model.fit_transform(docs, embeddings=precomputed_embeddings)
 
     return topic_model, topics, probs
 

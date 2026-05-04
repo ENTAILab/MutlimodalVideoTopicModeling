@@ -94,7 +94,8 @@ flowchart LR
   - Output: `segments.json` with `segment_id`, `start_s`, `end_s`, and text.
 
 3. Speaker representation + clustering (`speaker`)
-  - Builds segment-level speaker embeddings (pyannote, with fallback behavior).
+  - Builds segment-level speaker embeddings with a configurable backend.
+  - Supports `pyannote_fallback` for pyannote embeddings with MFCC fallback, or `clap` for CLAP audio embeddings.
   - Clusters via UMAP + HDBSCAN and attaches speaker labels.
   - Outputs include `audio_embeddings.npy` and `audio_umap.npy`.
 

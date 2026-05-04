@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video-dir", default="data", help="Directory to search for MP4 files")
     parser.add_argument("--all-mp4", action="store_true", help="Process all MP4 files found under --video-dir")
     parser.add_argument("--config", default="configs/default.yaml", help="Path to YAML config")
+    parser.add_argument("--skip-existing", default=False, help="Skip processing videos that have already been processed based on presence of output files")
     parser.add_argument(
         "--stages",
         default="audio,asr,speaker,frames,clip,visual_cluster,fusion,topic,merge,summary,metrics,viz",
@@ -287,8 +288,12 @@ def _run_video_pipeline(
         audio_vectors = embed_segments(
             wav_path=wav_path,
             segments=segments,
+            backend=str(cfg.get("speaker", "backend", default="pyannote_fallback")),
             model_name=str(cfg.get("speaker", "model_name", default="pyannote/embedding")),
             hf_token_env=str(cfg.get("speaker", "use_auth_token_env", default="HF_TOKEN")),
+            clap_model_name=str(cfg.get("speaker", "clap_model_name", default="laion/clap-htsat-unfused")),
+            clap_device=str(cfg.get("speaker", "clap_device", default="cuda")),
+            clap_sampling_rate=int(cfg.get("speaker", "clap_sampling_rate", default=48000)),
             fallback_bins=int(cfg.get("speaker", "fallback_mfcc_bins", default=64)),
         )
         save_numpy(processed_dir / "audio_embeddings.npy", audio_vectors)
@@ -568,15 +573,16 @@ def main() -> None:
     runs: list[dict[str, Any]] = []
     for video_path in videos:
         run_stem = _run_stem_for_video(video_path, args)
-        if _is_already_processed(
-            run_stem=run_stem,
-            stages=stages,
-            cfg=cfg,
-            output_root_override=output_root_override,
-            is_batch=is_batch,
-        ):
-            print(f"[SKIP] Already processed: {video_path} (run stem: {run_stem})")
-            continue
+        if args.skip_existing == True:
+            if _is_already_processed(
+                run_stem=run_stem,
+                stages=stages,
+                cfg=cfg,
+                output_root_override=output_root_override,
+                is_batch=is_batch,
+            ):
+                print(f"[SKIP] Already processed: {video_path} (run stem: {run_stem})")
+                continue
 
         run_info = _run_video_pipeline(
             video_path=video_path,
