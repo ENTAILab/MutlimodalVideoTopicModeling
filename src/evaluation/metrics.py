@@ -135,6 +135,93 @@ def _npmi_topic_coherence(topic_info: list[dict[str, Any]], docs: list[str]) -> 
     return float(np.mean(topic_scores))
 
 
+def calculate_we_score(topic_embeddings_list, aggregate_model_score=True):
+    """
+        Word Embedding (WE) Score: Calculates pairwise cosine similarity.
+
+        Args:
+            topic_embeddings_list (list): A list where each element is a 2D numpy array
+                                          of shape (num_words, embedding_dim) for a single topic.
+            aggregate_model_score (bool): If True, returns the mean score across all topics (model level).
+                                          If False, returns a list of scores for each individual topic.
+        Returns:
+            float or list: The overall model score, or a list of individual topic scores.
+        """
+    topic_scores = []
+
+    for embeddings in topic_embeddings_list:
+        if len(embeddings) < 2:
+            topic_scores.append(0.0)
+            continue
+
+        sim_matrix = cosine_similarity(embeddings)
+        pairwise_sims = sim_matrix[np.triu_indices(len(embeddings), k=1)]
+        topic_scores.append(float(np.mean(pairwise_sims)))
+
+    return float(np.mean(topic_scores)) if aggregate_model_score else topic_scores
+
+
+def calculate_iec_score(topic_embeddings_list, aggregate_model_score=True):
+    """
+    Image Embedding-based Coherence (IEC): Calculates average pairwise visual similarity.
+
+    Args:
+        topic_embeddings_list (list): A list of 2D numpy arrays of multimodal embeddings.
+        aggregate_model_score (bool): If True, returns the overall model mean (Eq 4).
+                                      If False, returns individual topic scores (Eq 3).
+    """
+    topic_scores = []
+
+    for embeddings in topic_embeddings_list:
+        if len(embeddings) < 2:
+            topic_scores.append(0.0)
+            continue
+
+        sim_matrix = cosine_similarity(embeddings)
+        pairwise_sims = sim_matrix[np.triu_indices(len(embeddings), k=1)]
+        topic_scores.append(float(np.mean(pairwise_sims)))
+
+    return float(np.mean(topic_scores)) if aggregate_model_score else topic_scores
+
+
+def calculate_ieps_score(topic_embeddings_list, return_pairwise_scores=False):
+    """
+    Image Embedding-based Pairwise Similarity (IEPS): Measures the diversity of a
+    topic model by computing similarity BETWEEN all pairs of topics.
+    (Lower score = Higher diversity).
+
+    Args:
+        topic_embeddings_list (list): A list of 2D numpy arrays of multimodal embeddings.
+        return_pairwise_scores (bool): If True, returns both the overall score and the
+                                       list of individual topic-pair scores.
+    Returns:
+        float: The overall IEPS score for the model.
+    """
+    num_topics = len(topic_embeddings_list)
+
+    if num_topics < 2:
+        print("Warning: Need at least 2 topics to calculate IEPS.")
+        return 0.0
+
+    pairwise_topic_scores = []
+    for i, j in combinations(range(num_topics), 2):
+        emb_i = topic_embeddings_list[i]
+        emb_j = topic_embeddings_list[j]
+
+        if len(emb_i) == 0 or len(emb_j) == 0:
+            pairwise_topic_scores.append(0.0)
+            continue
+
+        cross_sim_matrix = cosine_similarity(emb_i, emb_j)
+        ieps_pair_score = float(np.mean(cross_sim_matrix))
+        pairwise_topic_scores.append(ieps_pair_score)
+
+    overall_ieps = float(np.mean(pairwise_topic_scores))
+
+    if return_pairwise_scores:
+        return overall_ieps, pairwise_topic_scores
+    return overall_ieps
+
 def compute_numeric_metrics(
     segments: list[dict[str, Any]],
     processed_dir: str | Path,
