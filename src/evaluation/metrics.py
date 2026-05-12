@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
+from sklearn.metrics.pairwise import cosine_similarity
 
 from src.utils import load_json
 
@@ -222,6 +223,104 @@ def calculate_ieps_score(topic_embeddings_list, return_pairwise_scores=False):
         return overall_ieps, pairwise_topic_scores
     return overall_ieps
 
+
+def _compute_embedding_coherence_scores(
+    embeddings: np.ndarray,
+    topics: np.ndarray,
+    topic_info: list[dict[str, Any]] | None = None,
+    word_embedding_model_name: str = "all-mpnet-base-v2",
+) -> dict[str, float | None]:
+    """
+    Compute IEC and WE scores for embeddings grouped by topic.
+
+    IEC (Image Embedding-based Coherence) is computed from the provided segment-level
+    embeddings grouped by topic (suitable for visual embeddings).
+
+    WE (Word Embedding score) is computed from top topic words (from topic_info)
+    by embedding the words with a sentence-transformer and computing intra-topic
+    pairwise similarity.
+
+    Args:
+        embeddings: 2D numpy array of shape (num_segments, embedding_dim)
+        topics: 1D numpy array of topic labels for each segment
+        topic_info: Optional list of topic dictionaries containing 'Topic' and
+                    'Representation' (top words) for each topic.
+        word_embedding_model_name: sentence-transformers model to use for word embeddings.
+
+    Returns:
+        Dictionary with 'iec_score' and 'we_score' keys
+    """
+    if embeddings.shape[0] != topics.shape[0]:
+        return {"iec_score": None, "we_score": None}
+
+    valid_mask = topics >= 0
+    valid_topics = topics[valid_mask]
+    valid_embeddings = embeddings[valid_mask]
+
+    if len(valid_topics) == 0:
+        return {"iec_score": None, "we_score": None}
+
+    unique_topics = np.unique(valid_topics)
+    topic_embeddings_list = []
+    for topic_id in sorted(unique_topics):
+        topic_mask = valid_topics == topic_id
+        topic_embs = valid_embeddings[topic_mask]
+        if len(topic_embs) > 0:
+            topic_embeddings_list.append(topic_embs)
+
+    if not topic_embeddings_list:
+        return {"iec_score": None, "we_score": None}
+
+    # IEC: visual / segment-level embedding coherence
+    try:
+        iec = calculate_iec_score(topic_embeddings_list, aggregate_model_score=True)
+    except Exception:
+        iec = None
+
+    # WE: compute from topic top-words (if provided); fall back to segment-level
+    we = None
+    if topic_info is not None:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            model = SentenceTransformer(word_embedding_model_name)
+
+            topic_word_embs = []
+            # Build a mapping from topic id -> representation words
+            topic_repr_map: dict[int, list[str]] = {}
+            for row in topic_info:
+                tid = int(row.get("Topic", -1))
+                if tid < 0:
+                    continue
+                reps = [str(w).strip() for w in row.get("Representation", []) if str(w).strip()]
+                if reps:
+                    topic_repr_map[tid] = reps[:20]
+
+            for topic_id in sorted(unique_topics):
+                words = topic_repr_map.get(int(topic_id), [])
+                if not words:
+                    # If no words for this topic, append empty array placeholder
+                    topic_word_embs.append(np.zeros((0, model.get_sentence_embedding_dimension())))
+                    continue
+                emb = model.encode(words, convert_to_numpy=True)
+                topic_word_embs.append(emb)
+
+            we = calculate_we_score(topic_word_embs, aggregate_model_score=True)
+        except Exception:
+            # If sentence-transformers is unavailable or encoding fails, fall back
+            # to computing WE on segment-level embeddings (previous behavior).
+            try:
+                we = calculate_we_score(topic_embeddings_list, aggregate_model_score=True)
+            except Exception:
+                we = None
+    else:
+        try:
+            we = calculate_we_score(topic_embeddings_list, aggregate_model_score=True)
+        except Exception:
+            we = None
+
+    return {"iec_score": iec, "we_score": we}
+
 def compute_numeric_metrics(
     segments: list[dict[str, Any]],
     processed_dir: str | Path,
@@ -282,6 +381,8 @@ def compute_numeric_metrics(
         embeddings = np.load(emb_path)
         if embeddings.shape[0] != topics.shape[0]:
             continue
-        metrics["embedding_cluster_metrics"][name] = _cluster_metrics(embeddings, topics)
+        cluster_metrics = _cluster_metrics(embeddings, topics)
+        coherence_scores = _compute_embedding_coherence_scores(embeddings, topics, topic_info=topic_info)
+        metrics["embedding_cluster_metrics"][name] = {**cluster_metrics, **coherence_scores}
 
     return metrics

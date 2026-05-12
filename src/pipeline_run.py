@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video", default=None, help="Path to a single input video")
     parser.add_argument("--video-dir", default="data", help="Directory to search for MP4 files")
     parser.add_argument("--all-mp4", action="store_true", help="Process all MP4 files found under --video-dir")
+    parser.add_argument("--datasets", nargs="+", default=[], help="List of dataset paths to process separately with per-dataset metrics")
     parser.add_argument("--config", default="configs/default.yaml", help="Path to YAML config")
     parser.add_argument("--skip-existing", default=False, help="Skip processing videos that have already been processed based on presence of output files")
     parser.add_argument(
@@ -566,61 +567,165 @@ def main() -> None:
     config_path = str(Path(args.config).resolve())
     timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     stages = {s.strip() for s in args.stages.split(",") if s.strip()}
-    videos = _discover_videos(args)
-    is_batch = args.all_mp4 or len(videos) > 1
+    is_batch = args.all_mp4 or len(_discover_videos(args)) > 1
     output_root_override = Path(args.output_dir) if args.output_dir else None
 
-    runs: list[dict[str, Any]] = []
-    for video_path in videos:
-        run_stem = _run_stem_for_video(video_path, args)
-        if args.skip_existing == True:
-            if _is_already_processed(
-                run_stem=run_stem,
-                stages=stages,
-                cfg=cfg,
-                output_root_override=output_root_override,
-                is_batch=is_batch,
-            ):
-                print(f"[SKIP] Already processed: {video_path} (run stem: {run_stem})")
+    # Handle multiple datasets if provided
+    if args.datasets:
+        datasets_results: dict[str, dict[str, Any]] = {}
+        output_root = output_root_override or Path(cfg.get("paths", "output_dir", default="data/output"))
+
+        for dataset_path in args.datasets:
+            dataset_name = Path(dataset_path).name or Path(dataset_path).stem
+            print(f"\n{'='*60}")
+            print(f"Processing dataset: {dataset_name} ({dataset_path})")
+            print(f"{'='*60}")
+
+            # Override video-dir for this dataset
+            original_video_dir = args.video_dir
+            args.video_dir = dataset_path
+            args.all_mp4 = True
+
+            try:
+                videos = _discover_videos(args)
+            except Exception as e:
+                print(f"Error discovering videos in {dataset_path}: {e}")
+                args.video_dir = original_video_dir
                 continue
 
-        run_info = _run_video_pipeline(
-            video_path=video_path,
-            run_stem=run_stem,
-            cfg=cfg,
-            stages=stages,
-            output_root_override=output_root_override,
-            is_batch=is_batch,
-            timestamp_utc=timestamp_utc,
-            config_path=config_path,
-        )
-        runs.append(run_info)
+            is_batch_dataset = len(videos) > 1
+            dataset_output_root = output_root / dataset_name if output_root_override is None else output_root
 
-    if "metrics" in stages and runs:
-        output_root = output_root_override or Path(cfg.get("paths", "output_dir", default="data/output"))
-        per_source_metrics: dict[str, list[dict[str, Any]]] = {}
-        for run in runs:
-            for source_name, metric_file in run.get("metrics_files", {}).items():
-                payload = load_json(metric_file)
-                per_source_metrics.setdefault(source_name, []).append(payload)
+            runs: list[dict[str, Any]] = []
+            for video_path in videos:
+                run_stem = _run_stem_for_video(video_path, args)
+                if args.skip_existing:
+                    if _is_already_processed(
+                        run_stem=run_stem,
+                        stages=stages,
+                        cfg=cfg,
+                        output_root_override=dataset_output_root if output_root_override is None else output_root_override,
+                        is_batch=is_batch_dataset,
+                    ):
+                        print(f"[SKIP] Already processed: {video_path} (run stem: {run_stem})")
+                        continue
 
-        aggregate = {
-            "meta": {
-                "timestamp_utc": timestamp_utc,
-                "config_path": config_path,
-                "config": cfg.raw,
-                "stages": sorted(stages),
-            },
-            "video_count": len(runs),
-            "videos": [{"stem": run["stem"], "output_dir": run["output_dir"]} for run in runs if run.get("stem") and run.get("output_dir")],
-            "sources": {},
-        }
-        for source_name, payloads in per_source_metrics.items():
-            aggregate["sources"][source_name] = _aggregate_metrics(payloads)
+                run_info = _run_video_pipeline(
+                    video_path=video_path,
+                    run_stem=run_stem,
+                    cfg=cfg,
+                    stages=stages,
+                    output_root_override=dataset_output_root if output_root_override is None else output_root_override,
+                    is_batch=is_batch_dataset,
+                    timestamp_utc=timestamp_utc,
+                    config_path=config_path,
+                )
+                runs.append(run_info)
 
-        save_json(output_root / "metrics_all_videos.json", aggregate)
-        safe_timestamp = timestamp_utc.replace(":", "-")
-        save_json(output_root / f"metrics_all_videos_{safe_timestamp}.json", aggregate)
+            # Aggregate metrics for this dataset
+            if "metrics" in stages and runs:
+                per_source_metrics: dict[str, list[dict[str, Any]]] = {}
+                for run in runs:
+                    for source_name, metric_file in run.get("metrics_files", {}).items():
+                        payload = load_json(metric_file)
+                        per_source_metrics.setdefault(source_name, []).append(payload)
+
+                dataset_aggregate = {
+                    "meta": {
+                        "timestamp_utc": timestamp_utc,
+                        "config_path": config_path,
+                        "config": cfg.raw,
+                        "stages": sorted(stages),
+                        "dataset_name": dataset_name,
+                        "dataset_path": dataset_path,
+                    },
+                    "video_count": len(runs),
+                    "videos": [{"stem": run["stem"], "output_dir": run["output_dir"]} for run in runs if run.get("stem") and run.get("output_dir")],
+                    "sources": {},
+                }
+                for source_name, payloads in per_source_metrics.items():
+                    dataset_aggregate["sources"][source_name] = _aggregate_metrics(payloads)
+
+                datasets_results[dataset_name] = dataset_aggregate
+
+                # Save per-dataset metrics
+                ensure_dir(dataset_output_root)
+                save_json(dataset_output_root / f"metrics_{dataset_name}.json", dataset_aggregate)
+                safe_timestamp = timestamp_utc.replace(":", "-")
+                save_json(dataset_output_root / f"metrics_{dataset_name}_{safe_timestamp}.json", dataset_aggregate)
+
+            args.video_dir = original_video_dir
+
+        # Aggregate all datasets
+        if datasets_results:
+            all_datasets_aggregate = {
+                "meta": {
+                    "timestamp_utc": timestamp_utc,
+                    "config_path": config_path,
+                    "config": cfg.raw,
+                    "stages": sorted(stages),
+                    "num_datasets": len(datasets_results),
+                },
+                "datasets": datasets_results,
+            }
+            save_json(output_root / "metrics_all_datasets.json", all_datasets_aggregate)
+            safe_timestamp = timestamp_utc.replace(":", "-")
+            save_json(output_root / f"metrics_all_datasets_{safe_timestamp}.json", all_datasets_aggregate)
+    else:
+        # Original single dataset/video logic
+        videos = _discover_videos(args)
+
+        runs: list[dict[str, Any]] = []
+        for video_path in videos:
+            run_stem = _run_stem_for_video(video_path, args)
+            if args.skip_existing == True:
+                if _is_already_processed(
+                    run_stem=run_stem,
+                    stages=stages,
+                    cfg=cfg,
+                    output_root_override=output_root_override,
+                    is_batch=is_batch,
+                ):
+                    print(f"[SKIP] Already processed: {video_path} (run stem: {run_stem})")
+                    continue
+
+            run_info = _run_video_pipeline(
+                video_path=video_path,
+                run_stem=run_stem,
+                cfg=cfg,
+                stages=stages,
+                output_root_override=output_root_override,
+                is_batch=is_batch,
+                timestamp_utc=timestamp_utc,
+                config_path=config_path,
+            )
+            runs.append(run_info)
+
+        if "metrics" in stages and runs:
+            output_root = output_root_override or Path(cfg.get("paths", "output_dir", default="data/output"))
+            per_source_metrics: dict[str, list[dict[str, Any]]] = {}
+            for run in runs:
+                for source_name, metric_file in run.get("metrics_files", {}).items():
+                    payload = load_json(metric_file)
+                    per_source_metrics.setdefault(source_name, []).append(payload)
+
+            aggregate = {
+                "meta": {
+                    "timestamp_utc": timestamp_utc,
+                    "config_path": config_path,
+                    "config": cfg.raw,
+                    "stages": sorted(stages),
+                },
+                "video_count": len(runs),
+                "videos": [{"stem": run["stem"], "output_dir": run["output_dir"]} for run in runs if run.get("stem") and run.get("output_dir")],
+                "sources": {},
+            }
+            for source_name, payloads in per_source_metrics.items():
+                aggregate["sources"][source_name] = _aggregate_metrics(payloads)
+
+            save_json(output_root / "metrics_all_videos.json", aggregate)
+            safe_timestamp = timestamp_utc.replace(":", "-")
+            save_json(output_root / f"metrics_all_videos_{safe_timestamp}.json", aggregate)
 
 
 if __name__ == "__main__":

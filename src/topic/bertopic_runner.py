@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import nltk
+nltk.download('stopwords')
+from nltk.corpus import stopwords
+
+
 import numpy as np
 # from pyarrow import cuda
 
@@ -43,12 +48,15 @@ def run_bertopic(
     else:
         max_df = preferred_max_df
 
-    vectorizer_model = CountVectorizer(
-        stop_words="english",
-        ngram_range=(1, 2),
-        min_df=min_df,
-        max_df=max_df,
-    )
+    # vectorizer_model = CountVectorizer(
+    #     stop_words="english",
+    #     ngram_range=(1, 2),
+    #     min_df=min_df,
+    #     max_df=max_df,
+    # )
+    from nltk.corpus import stopwords
+    german_stopwords = stopwords.words('german')
+    vectorizer_model = CountVectorizer(stop_words=german_stopwords)
     ctfidf_model = ClassTfidfTransformer(reduce_frequent_words=True)
     guided_seed_topic_list = seed_topic_list or None
     embedding_model = None

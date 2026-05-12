@@ -42,22 +42,30 @@ Please provide **only the label**, no extra text or explanation.
 
 if __name__ == "__main__":
     args = argparse.ArgumentParser()
-    args.add_argument("--base_path", type=str, required=True)
-    args.add_argument("--api_key", type=str, required=True)
+    args.add_argument("--base_path", type=str, default="data/output/") # path to the dataset containing video directories
+    args.add_argument("--api_key", type=str, default=None) # API key for the language model
     args.add_argument("--model_name", type=str, default="gemma3:latest") # gemma3:latest  llama3.2:latest
 
-    BASE_TM_RESULTS_PATH = args.parse_args().base_path
+    BASE_DATASET_PATH = args.parse_args().base_path
     model_name = args.parse_args().model_name
     api_key = args.parse_args().api_key
 
     print(f"Generating Labels using {model_name}")
 
-    tm_result_files = [filename for filename in os.listdir(BASE_TM_RESULTS_PATH) if filename.endswith('.json')]
+    # Iterate over all video directories in the dataset
+    video_dirs = [d for d in os.listdir(BASE_DATASET_PATH) if os.path.isdir(os.path.join(BASE_DATASET_PATH, d))]
 
-    for filename in tqdm(tm_result_files, desc=f"Processing Files..."):
-        filepath = os.path.join(BASE_TM_RESULTS_PATH,filename)
-        data = json.load(open(filepath))
-        for topic in tqdm(data, desc=f"Processing Topics..."):
+    for video_dir in tqdm(video_dirs, desc="Processing Videos..."):
+        video_path = os.path.join(BASE_DATASET_PATH, video_dir)
+        topics_info_path = os.path.join(video_path, "topic_info.json")
+        
+        # Check if topics_info.json exists in this video directory
+        if not os.path.exists(topics_info_path):
+            print(f"topic_info.json not found in {topics_info_path}. Skipping...")
+            continue
+        
+        data = json.load(open(topics_info_path))
+        for topic in tqdm(data, desc=f"Processing Topics in {video_dir}..."):
             if topic['Topic'] == -1:
                 continue
             keywords = topic['Representation']
@@ -66,6 +74,6 @@ if __name__ == "__main__":
             response = generate_label(model_name, api_key, topic_prompt)
             topic['label'] = response['choices'][0]['message']['content'].split('\n')[0]
 
-
-        json.dump(data, open(os.path.join(BASE_TM_RESULTS_PATH, filename), 'w+'), indent=4)
+        cleaned_topics_info_path = os.path.join(video_path, "cleaned_topics_info.json")
+        json.dump(data, open(cleaned_topics_info_path, 'w+'), indent=4)
 

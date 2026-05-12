@@ -177,6 +177,24 @@ python -m src.pipeline_run \
   --stages audio,asr,speaker,frames,clip,topic,viz
 ```
 
+## Annotation Website
+
+The cross-video annotation bundle is available under `data/output/annotation/cross_video`. A shared FastAPI + SQLite web app reads that bundle and lets multiple annotators claim tasks concurrently.
+
+Initialize the SQLite database and import the annotation tasks:
+
+```bash
+python -m annotation_web.main --init-db
+```
+
+Run the website:
+
+```bash
+python -m annotation_web.main --host 0.0.0.0 --port 8000
+```
+
+The app stores task claims and responses in `data/annotation.sqlite3`. It uses SQLite WAL mode and lock expiration so several people can annotate at the same time without stepping on each other.
+
 ## Guided / Semi-supervised Topics
 
 By default, BERTopic runs unsupervised. To guide topic discovery toward known themes, edit `configs/default.yaml` and add `topic.seed_topic_list` entries such as:
@@ -283,3 +301,12 @@ Important artifacts:
 - `multimodal_topic_embeddings.npy` (when `topic.embedding_source=multimodal`)
 - `segments_enriched.json`, `segments_enriched_text.json`, `segments_enriched_multimodal.json`
 - `timeline.html`
+## annotation creation
+### Create 50 total tasks (= 25 annotation points → 100 DB tasks with dual assignment)
+python scripts/create_annotations.py --num_tasks 50
+
+### Initialize database
+python -m annotation_web.main --init-db
+
+### Start annotation server
+python -m annotation_web.main --host 127.0.0.1 --port 8333
