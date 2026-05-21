@@ -485,9 +485,9 @@ def main():
     parser.add_argument("--processed_root", default="data/processed", help="Root processed folder")
     parser.add_argument("--dest", default="data/output/annotation/cross_video", help="Cross-video annotation destination root")
     parser.add_argument("--top_n", type=int, default=None, help="Number of annotation points to keep (overrides --num_tasks)")
-    parser.add_argument("--num_tasks", type=int, default=100, help="Total number of annotation tasks (default: 100; expands to 400 with dual assignment)")
-    parser.add_argument("--intrusion_k", type=int, default=5, help="Number of in-topic images for intrusion tests")
-    parser.add_argument("--matching_k", type=int, default=4, help="Number of images for topic matching tests")
+    parser.add_argument("--num_tasks", type=int, default=150, help="Total number of annotation tasks (default: 100; expands to 400 with dual assignment)")
+    parser.add_argument("--intrusion_k", type=int, default=7, help="Number of in-topic images for intrusion tests")
+    parser.add_argument("--matching_k", type=int, default=6, help="Number of images for topic matching tests")
     parser.add_argument("--seed", type=int, default=7, help="Random seed for intruder selection")
     args = parser.parse_args()
 
