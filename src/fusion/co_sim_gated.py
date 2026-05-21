@@ -10,7 +10,7 @@ def _align_to_common_dim(*arrays: np.ndarray) -> list[np.ndarray]:
     return [arr[:, :min_dim] for arr in arrays]
 
 
-def co_attention_fuse(
+def similarity_gated_concatenation(
     audio_vectors: np.ndarray,
     visual_vectors: np.ndarray,
     weight_audio: float = 0.5,
@@ -35,7 +35,7 @@ def co_attention_fuse(
     return l2_normalize(fused)
 
 
-def co_attention_fuse_multimodal(
+def similarity_gated_concatenation_multimodal(
     text_vectors: np.ndarray,
     audio_vectors: np.ndarray,
     visual_vectors: np.ndarray,
