@@ -12,7 +12,11 @@ from src.audio.speaker_embeddings import embed_segments
 from src.clustering.cluster import run_umap_hdbscan
 from src.config import ensure_dir, load_config
 from src.evaluation.metrics import compute_numeric_metrics
-from src.fusion.co_attention import co_attention_fuse, co_attention_fuse_multimodal
+from src.fusion.co_sim_gated import (
+    similarity_gated_concatenation,
+    similarity_gated_concatenation_multimodal,
+    naive_concatenation,
+)
 from src.preprocess.audio_extractor import extract_wav
 from src.topic.bertopic_runner import encode_text_segments, run_bertopic
 from src.topic.summarize_local import summarize_topics_extractively
@@ -28,6 +32,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video", default=None, help="Path to a single input video")
     parser.add_argument("--video-dir", default="data", help="Directory to search for MP4 files")
     parser.add_argument("--all-mp4", action="store_true", help="Process all MP4 files found under --video-dir")
+    parser.add_argument(
+        "--allowed-videos-file",
+        default=None,
+        help="Optional path to a file listing allowed video file paths (one per line). If set, only videos in this list will be processed.",
+    )
     parser.add_argument("--datasets", nargs="+", default=[], help="List of dataset paths to process separately with per-dataset metrics")
     parser.add_argument("--config", default="configs/default.yaml", help="Path to YAML config")
     parser.add_argument("--skip-existing", default=False, help="Skip processing videos that have already been processed based on presence of output files")
@@ -62,6 +71,19 @@ def _flatten_numeric(prefix: str, payload: Any, out: dict[str, float]) -> None:
 
 def _discover_videos(args: argparse.Namespace) -> list[Path]:
     videos: list[Path] = []
+    # If an allowed-videos-file is provided, read that and return those paths (after validation).
+    if getattr(args, "allowed_videos_file", None):
+        allowed_file = Path(args.allowed_videos_file)
+        if not allowed_file.exists():
+            raise RuntimeError(f"Allowed videos file not found: {allowed_file}")
+        with allowed_file.open("r", encoding="utf-8") as handle:
+            lines = [l.strip() for l in handle.readlines() if l.strip()]
+        videos = [Path(l) for l in lines]
+        missing = [p for p in videos if not p.exists()]
+        if missing:
+            raise RuntimeError(f"Video file not found: {missing[0]}")
+        return videos
+
     if args.all_mp4:
         root = Path(args.video_dir)
         if not root.exists():
@@ -329,6 +351,11 @@ def _run_video_pipeline(
 
     visual_vectors = None
     if "clip" in stages:
+        if "frames" not in stages:
+                frames_path = processed_dir / "segment_frames.json"
+                if not frames_path.exists():
+                    raise RuntimeError("Segment frames not found. Include stage 'frames' before 'clip'.")
+                segment_to_frames = load_json(frames_path)
         if not segment_to_frames:
             raise RuntimeError("No frames found. Include stage 'frames' before 'clip'.")
         clip_backend = str(cfg.get("clip", "backend", default="clip"))
@@ -336,6 +363,8 @@ def _run_video_pipeline(
             segment_to_frames=segment_to_frames,
             model_name=str(cfg.get("clip", "model_name", default="ViT-B-32")),
             pretrained=str(cfg.get("clip", "pretrained", default="laion2b_s34b_b79k")),
+            signlip_model_name=str(cfg.get("clip", "signlip_model_name", default="ViT-SO400M-14-SigLIP-384")),
+            signlip_pretrained=str(cfg.get("clip", "signlip_pretrained", default="webli")),
             device=str(cfg.get("clip", "device", default="cuda")),
             backend=clip_backend,
             vllm_base_url=str(cfg.get("clip", "vllm_base_url", default="http://localhost:8000/v1")),
@@ -365,7 +394,7 @@ def _run_video_pipeline(
         if visual_vectors is None:
             visual_vectors = np.load(processed_dir / "visual_embeddings.npy")
 
-        fused = co_attention_fuse(
+        fused = similarity_gated_concatenation(
             audio_vectors,
             visual_vectors,
             weight_audio=float(cfg.get("fusion", "weight_audio", default=0.5)),
@@ -396,6 +425,7 @@ def _run_video_pipeline(
             seed_topic_list = raw_seed_topics
 
         multimodal_embeddings = None
+        tv_concat = ta_concat = tav_concat = None
         if topic_embedding_source in {"multimodal", "coattention", "co_attention", "both"}:
             audio_vectors = np.load(processed_dir / "audio_embeddings.npy")
             if visual_vectors is None:
@@ -404,8 +434,9 @@ def _run_video_pipeline(
                 segments,
                 sentence_model_name=str(cfg.get("topic", "sentence_model", default="all-mpnet-base-v2")),
                 device=str(cfg.get("topic", "sentence_model_device", default="cuda")),
+                show_progress=True,
             )
-            multimodal_embeddings = co_attention_fuse_multimodal(
+            multimodal_embeddings = similarity_gated_concatenation_multimodal(
                 text_vectors=text_vectors,
                 audio_vectors=audio_vectors,
                 visual_vectors=visual_vectors,
@@ -415,16 +446,45 @@ def _run_video_pipeline(
             )
             save_numpy(processed_dir / "multimodal_topic_embeddings.npy", multimodal_embeddings)
 
+            # Baseline: simple L2-normalized concatenations (no gate, no interactions)
+            try:
+                tv_concat = naive_concatenation(text_vectors, visual_vectors)
+                save_numpy(processed_dir / "multimodal_topic_embeddings_concat_text_visual.npy", tv_concat)
+            except ValueError:
+                tv_concat = None
+
+            try:
+                ta_concat = naive_concatenation(text_vectors, audio_vectors)
+                save_numpy(processed_dir / "multimodal_topic_embeddings_concat_text_audio.npy", ta_concat)
+            except ValueError:
+                ta_concat = None
+
+            try:
+                tav_concat = naive_concatenation(text_vectors, audio_vectors, visual_vectors)
+                save_numpy(processed_dir / "multimodal_topic_embeddings_concat_text_audio_visual.npy", tav_concat)
+            except ValueError:
+                tav_concat = None
+
+        sources: list[tuple[str, np.ndarray | None]]
+        # Build sources to run BERTopic on. If multimodal embeddings were computed,
+        # include the gated multimodal representation and simple concatenation baselines.
         sources: list[tuple[str, np.ndarray | None]]
         if topic_embedding_source == "both":
-            sources = [
-                ("text", None),
-                ("multimodal", multimodal_embeddings),
-            ]
+            sources = [("text", None)]
+            # fall through to append multimodal variants below
         elif topic_embedding_source in {"multimodal", "coattention", "co_attention"}:
-            sources = [("multimodal", multimodal_embeddings)]
+            sources = []
         else:
             sources = [("text", None)]
+
+        if multimodal_embeddings is not None:
+            sources.append(("multimodal", multimodal_embeddings))
+            if tv_concat is not None:
+                sources.append(("concat_text_visual", tv_concat))
+            if ta_concat is not None:
+                sources.append(("concat_text_audio", ta_concat))
+            if tav_concat is not None:
+                sources.append(("concat_text_audio_visual", tav_concat))
 
         for source_name, source_embeddings in sources:
             source_model, source_topics, _ = run_bertopic(
@@ -677,30 +737,35 @@ def main() -> None:
 
         runs: list[dict[str, Any]] = []
         for video_path in videos:
-            run_stem = _run_stem_for_video(video_path, args)
-            if args.skip_existing == True:
-                if _is_already_processed(
+            
+            try:
+                run_stem = _run_stem_for_video(video_path, args)
+                if args.skip_existing == True:
+                    if _is_already_processed(
+                        run_stem=run_stem,
+                        stages=stages,
+                        cfg=cfg,
+                        output_root_override=output_root_override,
+                        is_batch=is_batch,
+                    ):
+                        print(f"[SKIP] Already processed: {video_path} (run stem: {run_stem})")
+                        continue
+
+                run_info = _run_video_pipeline(
+                    video_path=video_path,
                     run_stem=run_stem,
-                    stages=stages,
                     cfg=cfg,
+                    stages=stages,
                     output_root_override=output_root_override,
                     is_batch=is_batch,
-                ):
-                    print(f"[SKIP] Already processed: {video_path} (run stem: {run_stem})")
-                    continue
-
-            run_info = _run_video_pipeline(
-                video_path=video_path,
-                run_stem=run_stem,
-                cfg=cfg,
-                stages=stages,
-                output_root_override=output_root_override,
-                is_batch=is_batch,
-                timestamp_utc=timestamp_utc,
-                config_path=config_path,
-            )
-            runs.append(run_info)
-
+                    timestamp_utc=timestamp_utc,
+                    config_path=config_path,
+                )
+                runs.append(run_info)
+            except Exception as e:
+                print(f"Error processing video {video_path}: {e}")
+                continue
+            
         if "metrics" in stages and runs:
             output_root = output_root_override or Path(cfg.get("paths", "output_dir", default="data/output"))
             per_source_metrics: dict[str, list[dict[str, Any]]] = {}
