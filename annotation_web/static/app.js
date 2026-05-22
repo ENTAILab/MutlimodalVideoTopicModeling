@@ -47,13 +47,43 @@ function escapeHtml(text) {
 
 function shuffleWithTracking(images) {
   // Create array of {url, originalIndex} to track original positions
-  const tracked = images.map((url, idx) => ({ url, originalIndex: idx + 1 }));
+  const tracked = Array.from(images).map((url, idx) => ({ url: String(url), originalIndex: idx + 1 }));
+  console.log("Before shuffle:", tracked.length, "images");
+  
   // Fisher-Yates shuffle
   for (let i = tracked.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [tracked[i], tracked[j]] = [tracked[j], tracked[i]];
   }
+  
+  console.log("After shuffle, order:", tracked.map(t => t.originalIndex));
   return tracked;
+}
+
+function showImageZoom(imageUrl) {
+  let modal = document.getElementById("imageModal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "imageModal";
+    modal.className = "image-modal";
+    modal.innerHTML = `
+      <div class="image-modal__content">
+        <button class="image-modal__close" type="button">&times;</button>
+        <img id="modalImage" src="" alt="zoomed image" />
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector(".image-modal__close").addEventListener("click", () => {
+      modal.classList.remove("active");
+    });
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) {
+        modal.classList.remove("active");
+      }
+    });
+  }
+  document.getElementById("modalImage").src = imageUrl;
+  modal.classList.add("active");
 }
 
 function renderWords(words) {
@@ -128,26 +158,13 @@ function renderTask(task) {
 `;
   el("taskInstructions").textContent = task.instructions || "Review the annotation and submit a response.";
 
-  if (task.task_type === "topic_matching") {
-    const keywordsText = helperKeywords.length ? helperKeywords.map((word) => escapeHtml(word)).join(" · ") : "No keywords available";
-    const docsText = helperDocs.length ? helperDocs.map((doc) => escapeHtml(doc)).join(" ") : "No representative excerpts available";
-    el("taskUsage").innerHTML = `
-      <div class="usage-summary__title">How this task uses the topic</div>
-      <div class="usage-summary__grid">
-        <div class="usage-summary__item"><span>Title</span><strong>${escapeHtml(displayTopic)}</strong></div>
-        <div class="usage-summary__item"><span>Helper keywords</span><strong>${keywordsText}</strong></div>
-        <div class="usage-summary__item"><span>Representative docs</span><strong>${docsText}</strong></div>
-      </div>
-    `;
-  } else {
-    el("taskUsage").innerHTML = "";
-  }
+  el("taskUsage").innerHTML = "";
 
-  if (task.task_type === "topic_matching") {
-    el("taskWords").innerHTML = renderTopicContext(task);
-  } else {
-    el("taskWords").innerHTML = renderWords(task.words || []);
-  }
+  // if (task.task_type === "topic_matching") {
+  //   el("taskWords").innerHTML = renderTopicContext(task);
+  // } else {
+  //   el("taskWords").innerHTML = renderWords(task.words || []);
+  // }
 
   const body = el("taskBody");
   body.innerHTML = "";
@@ -158,6 +175,8 @@ function renderTask(task) {
     const originalImages = task.images || [];
     console.log("Original images order:", originalImages);
     const shuffledImages = shuffleWithTracking(originalImages);
+    // keep the current shuffled order in state so we can record the original position on submit
+    state.currentShuffledImages = shuffledImages;
     console.log("Shuffled images order:", shuffledImages.map(i => i.originalIndex));
     
     grid.className = "image-grid image-grid--intrusion";
@@ -171,21 +190,46 @@ function renderTask(task) {
         <img src="${item.url}" alt="candidate ${index + 1}" />
         <div class="image-option__label">${index + 1}</div>
         <div class="image-option__caption">Candidate ${index + 1}</div>
-        <div class="image-option__origin" title="Original position (randomized)">• orig ${item.originalIndex}</div>
+        <div class="image-option__origin" style="color:#ffff" title="Original position (randomized)">• orig ${item.originalIndex}</div>
       `;
-      card.addEventListener("click", () => {
+      const selectCard = () => {
         state.selectedImageIndex = index;
         body.querySelectorAll(".image-option").forEach((node) => node.classList.remove("selected"));
         card.classList.add("selected");
+      };
+      const img = card.querySelector("img");
+      img.addEventListener("click", (e) => {
+        e.stopPropagation();
+        selectCard();
+        showImageZoom(item.url);
+      });
+      card.addEventListener("click", () => {
+        selectCard();
       });
       grid.appendChild(card);
     });
     body.appendChild(grid);
     el("responseFields").innerHTML = `<div class="pill pill--muted">Images are randomized • Select the intruder from the grid above</div>`;
   } else {
+    // Topic Matching - two column layout: context left, images right
+    const wrapper = document.createElement("div");
+    wrapper.className = "task-body-wrapper";
+    
+    // Left side: context (keywords & docs)
+    const contextDiv = document.createElement("div");
+    contextDiv.className = "task-context";
+    contextDiv.innerHTML = renderTopicContext(task);
+    wrapper.appendChild(contextDiv);
+    
+    // Right side: images and rating
+    const imagesSection = document.createElement("div");
+    imagesSection.className = "task-images-section";
+    
     const grid = document.createElement("div");
     grid.className = "image-grid image-grid--matching";
     const shuffledImages = shuffleWithTracking(task.images || []);
+    // store shuffled mapping for consistency if needed elsewhere
+    state.currentShuffledImages = shuffledImages;
     
     shuffledImages.forEach((item, index) => {
       const card = document.createElement("div");
@@ -196,12 +240,17 @@ function renderTask(task) {
         <img src="${item.url}" alt="topic image ${index + 1}" />
         <div class="image-option__label">${index + 1}</div>
         <div class="image-option__caption">Topic image ${index + 1}</div>
-        <div class="image-option__origin" title="Original position (randomized)">• orig ${item.originalIndex}</div>
+        <div class="image-option__origin" style="color:#ffff" title="Original position (randomized)">• orig ${item.originalIndex}</div>
       `;
+      const img = card.querySelector("img");
+      img.addEventListener("click", (e) => {
+        e.stopPropagation();
+        showImageZoom(item.url);
+      });
       grid.appendChild(card);
     });
-    body.appendChild(grid);
-
+    imagesSection.appendChild(grid);
+    
     const rating = document.createElement("div");
     rating.className = "response-box";
     rating.innerHTML = `
@@ -209,7 +258,7 @@ function renderTask(task) {
       <div class="rating-group" id="ratingGroup"></div>
       <p class="hint">1 = poor match, 5 = strong match.</p>
     `;
-    body.appendChild(rating);
+    imagesSection.appendChild(rating);
     const ratingGroup = rating.querySelector("#ratingGroup");
     for (let score = 1; score <= 5; score += 1) {
       const label = document.createElement("label");
@@ -221,7 +270,10 @@ function renderTask(task) {
       });
       ratingGroup.appendChild(label);
     }
-    el("responseFields").innerHTML = `<div class="pill pill--muted">Images are randomized • Rate the match using context below</div>`;
+    
+    wrapper.appendChild(imagesSection);
+    body.appendChild(wrapper);
+    el("responseFields").innerHTML = `<div class="pill pill--muted">Images are randomized • Rate the match using context</div>`;
   }
 }
 
@@ -262,6 +314,12 @@ async function login(username) {
 }
 
 async function claimTask(taskType) {
+  if (state.activeTask && state.activeTask.task_type !== taskType && taskType !== "any") {
+    await api(`/api/tasks/${state.activeTask.task_db_id}/release`, { method: "POST" });
+    state.activeTask = null;
+    showTask(false);
+  }
+
   const result = await api("/api/tasks/claim", { method: "POST", body: JSON.stringify({ task_type: taskType }) });
   if (!result.task) {
     setMessage(result.message || "No task available.", "error");
@@ -282,6 +340,9 @@ async function submitTask() {
       return;
     }
     response.selected_image_index = state.selectedImageIndex;
+    const orig = state.currentShuffledImages && state.currentShuffledImages[state.selectedImageIndex] ? state.currentShuffledImages[state.selectedImageIndex].originalIndex : null;
+    if (orig !== null) response.selected_image_original_index = orig;
+    console.log("Selected image original index:", orig);
   } else {
     if (state.selectedRating === null) {
       setMessage("Choose a match score before submitting.", "error");
@@ -299,13 +360,21 @@ async function submitTask() {
   el("nextBtn").textContent = `Claim next ${taskType.replace("_", " ")}`;
   el("nextBtn").dataset.taskType = taskType;
   state.activeTask = null;
+  // clear shuffled mapping after submit
+  state.currentShuffledImages = null;
   await refreshDashboardCountsOnly();
+  
+  // Auto-claim next task after a short delay
+  setTimeout(() => {
+    el("nextBtn").click();
+  }, 800);
 }
 
 async function releaseTask() {
   if (!state.activeTask) return;
   await api(`/api/tasks/${state.activeTask.task_db_id}/release`, { method: "POST" });
   state.activeTask = null;
+  state.currentShuffledImages = null;
   setMessage("Task released.");
   await refreshDashboardCountsOnly();
   showTask(false);
