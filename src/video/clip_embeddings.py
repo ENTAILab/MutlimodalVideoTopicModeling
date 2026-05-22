@@ -11,6 +11,7 @@ import numpy as np
 import open_clip
 import torch
 from PIL import Image
+from tqdm.auto import tqdm
 
 
 def _embed_frames_openclip(
@@ -26,7 +27,9 @@ def _embed_frames_openclip(
 
     out: dict[int, np.ndarray] = {}
     with torch.no_grad():
-        for seg_id, frame_paths in segment_to_frames.items():
+        for seg_id, frame_paths in tqdm(
+            segment_to_frames.items(), desc="openCLIP visual embeddings", unit="seg", total=len(segment_to_frames)
+        ):
             frame_embeddings: list[np.ndarray] = []
             for frame_path in frame_paths:
                 img = Image.open(frame_path).convert("RGB")
@@ -105,7 +108,9 @@ def _embed_frames_vllm_api(
     out: dict[int, np.ndarray] = {}
     inferred_dim: int | None = None
 
-    for seg_id, frame_paths in segment_to_frames.items():
+    for seg_id, frame_paths in tqdm(
+        segment_to_frames.items(), desc="vLLM visual embeddings", unit="seg", total=len(segment_to_frames)
+    ):
         frame_embeddings: list[np.ndarray] = []
         for frame_path in frame_paths:
             emb = _fetch_vllm_embedding(
@@ -132,6 +137,8 @@ def embed_frames_per_segment(
     segment_to_frames: dict[int, list[str]],
     model_name: str = "ViT-B-32",
     pretrained: str = "laion2b_s34b_b79k",
+    signlip_model_name: str = "ViT-SO400M-14-SigLIP-384",
+    signlip_pretrained: str = "webli",
     device: str = "cuda",
     backend: str = "clip",
     vllm_base_url: str = "http://localhost:8000/v1",
@@ -151,6 +158,15 @@ def embed_frames_per_segment(
             fallback_embedding_dim=fallback_embedding_dim,
         )
 
+    if selected_backend in {"signlip", "sgnlip", "siglip", "sigclip"}:
+        return _embed_frames_openclip(
+            segment_to_frames=segment_to_frames,
+            model_name=signlip_model_name,
+            pretrained=signlip_pretrained,
+            device=device,
+            fallback_embedding_dim=fallback_embedding_dim,
+        )
+
     if selected_backend in {"vllm", "vllm_api"}:
         return _embed_frames_vllm_api(
             segment_to_frames=segment_to_frames,
@@ -162,11 +178,23 @@ def embed_frames_per_segment(
             fallback_embedding_dim=fallback_embedding_dim,
         )
 
-    raise ValueError(f"Unknown visual embedding backend '{backend}'. Use 'clip' or 'vllm_api'.")
+    raise ValueError(f"Unknown visual embedding backend '{backend}'. Use 'clip', 'signlip', or 'vllm_api'.")
 
 
 def to_segment_matrix(segments: list[dict[str, Any]], visual_map: dict[int, np.ndarray]) -> np.ndarray:
     vectors: list[np.ndarray] = []
+    # Infer embedding dimension from first available embedding
+    inferred_dim: int | None = None
+    if visual_map:
+        inferred_dim = next(iter(visual_map.values())).shape[0]
+    
     for seg in segments:
-        vectors.append(visual_map[int(seg["segment_id"])])
-    return np.vstack(vectors)
+        seg_id = int(seg["segment_id"])
+        if seg_id in visual_map:
+            vectors.append(visual_map[seg_id])
+        else:
+            # Use zero vector as fallback for missing embeddings
+            dim = inferred_dim if inferred_dim is not None else 512
+            vectors.append(np.zeros((dim,), dtype=np.float32))
+    
+    return np.vstack(vectors) if vectors else np.array([], dtype=np.float32).reshape(0, 512)

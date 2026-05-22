@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 import torchaudio
+from tqdm.auto import tqdm
 
 
 def _load_wav_tensor(wav_path: str | Path) -> tuple[torch.Tensor, int]:
@@ -80,7 +81,7 @@ def _pyannote_embeddings(
     audio = {"waveform": waveform, "sample_rate": sample_rate}
 
     vectors: list[np.ndarray] = []
-    for seg in segments:
+    for seg in tqdm(segments, desc="pyannote audio embeddings", unit="seg"):
         emb = infer.crop(audio, Segment(seg["start_s"], seg["end_s"]))
         arr = np.asarray(emb, dtype=np.float32)
         if arr.ndim > 1:
@@ -105,7 +106,7 @@ def _clap_embeddings(
     model.eval()
 
     vectors: list[np.ndarray] = []
-    for seg in segments:
+    for seg in tqdm(segments, desc="CLAP audio embeddings", unit="seg"):
         chunk = _segment_waveform(waveform, sample_rate, seg["start_s"], seg["end_s"])
         chunk = _resample_waveform(chunk, sample_rate, target_sample_rate)
         audio_np = _mono_numpy_audio(chunk)
@@ -157,9 +158,9 @@ def embed_segments(
                 target_sample_rate=clap_sampling_rate,
             )
     except Exception as e:
-        print(f"Error occurred while computing speaker embeddings with backend '{backend}': {e}")
+        print(f"Error occurred while computing speaker embeddings with backend '{backend}', fallback mechanism used, error: {e}")
         vectors = [
             _mfcc_fallback(waveform, sample_rate, seg["start_s"], seg["end_s"], bins=fallback_bins)
-            for seg in segments
+            for seg in tqdm(segments, desc="MFCC fallback embeddings", unit="seg")
         ]
         return np.vstack(vectors)

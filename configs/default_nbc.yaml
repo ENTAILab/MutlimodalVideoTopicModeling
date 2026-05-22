@@ -1,8 +1,8 @@
 seed: 42
 
 paths:
-  processed_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/processed
-  output_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/output
+  processed_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/processed_nbc
+  output_dir: /home/staff_homes/aabusale/desk/video_topic_modeling/data/output_nbc
 
 audio:
   sample_rate: 16000
