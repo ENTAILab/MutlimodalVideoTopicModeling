@@ -78,3 +78,22 @@ def similarity_gated_concatenation_multimodal(
         axis=1,
     )
     return l2_normalize(fused)
+
+
+def naive_concatenation(*arrays: np.ndarray) -> np.ndarray:
+    """Simple L2-normalized concatenation baseline for one or more modalities.
+
+    Each input array is L2-normalized per-row, trimmed to the minimum feature
+    dimension across inputs, concatenated, and the final vector is L2-normalized.
+    This implements the reviewer's "simple L2-normalized concat" baseline.
+    """
+    if not arrays:
+        raise ValueError("At least one array must be provided")
+    length = len(arrays[0])
+    if any(len(a) != length for a in arrays):
+        raise ValueError("All input arrays must have the same number of rows")
+
+    normed = [l2_normalize(a) for a in arrays]
+    trimmed = _align_to_common_dim(*normed)
+    fused = np.concatenate(trimmed, axis=1)
+    return l2_normalize(fused)

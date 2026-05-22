@@ -55,8 +55,12 @@ def run_bertopic(
     #     max_df=max_df,
     # )
     from nltk.corpus import stopwords
-    german_stopwords = stopwords.words('german')
-    vectorizer_model = CountVectorizer(stop_words=german_stopwords)
+    # german
+    # german_stopwords = stopwords.words('german')
+    # vectorizer_model = CountVectorizer(stop_words=german_stopwords)
+    # English
+    english_stopwords = stopwords.words('english')
+    vectorizer_model = CountVectorizer(stop_words=english_stopwords)
     ctfidf_model = ClassTfidfTransformer(reduce_frequent_words=True)
     guided_seed_topic_list = seed_topic_list or None
     embedding_model = None
@@ -115,10 +119,11 @@ def encode_text_segments(
     segments: list[dict[str, Any]],
     sentence_model_name: str = "all-mpnet-base-v2",
     device: str = "cuda",
+    show_progress: bool = True,
 ) -> np.ndarray:
     from sentence_transformers import SentenceTransformer
 
     docs = [str(seg.get("text", "")).strip() or "[EMPTY]" for seg in segments]
     model = SentenceTransformer(sentence_model_name, device=device)
-    embeddings = model.encode(docs, show_progress_bar=False, convert_to_numpy=True)
+    embeddings = model.encode(docs, show_progress_bar=show_progress, convert_to_numpy=True)
     return np.asarray(embeddings, dtype=np.float32)
