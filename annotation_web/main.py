@@ -62,6 +62,28 @@ def rel_file_url(path: str | Path) -> str:
         except ValueError:
             return file_path.as_posix()
 
+
+def _is_valid_username(name: str) -> bool:
+    if not name:
+        return False
+    low = name.strip().lower()
+    if "test" in low or "home" in low:
+        return False
+    return True
+
+
+def _purge_invalid_users(conn: sqlite3.Connection) -> None:
+    # Remove users whose username contains 'test' or 'home', and clear task references
+    rows = conn.execute("SELECT id, username FROM users WHERE LOWER(username) LIKE '%test%' OR LOWER(username) LIKE '%home%'").fetchall()
+    ids = [int(r[0]) for r in rows]
+    if not ids:
+        return
+    placeholders = ",".join(["?"] * len(ids))
+    conn.execute(f"UPDATE tasks SET claimed_by_user_id = NULL WHERE claimed_by_user_id IN ({placeholders})", ids)
+    conn.execute(f"UPDATE tasks SET completed_by_user_id = NULL WHERE completed_by_user_id IN ({placeholders})", ids)
+    conn.execute(f"DELETE FROM users WHERE id IN ({placeholders})", ids)
+    conn.commit()
+
 # --- HTML Template ---
 def render_shell(title: str = "Video Topic Annotation") -> str:
     return f"""<!doctype html>
@@ -78,7 +100,6 @@ def render_shell(title: str = "Video Topic Annotation") -> str:
             <div>
                 <div class="eyebrow">Multimodal annotation workspace</div>
                 <h1>Video Topic Annotation</h1>
-                <p class="subtitle">Shared queue, SQLite persistence, and lock-based task claiming for multiple annotators.</p>
             </div>
             <div class="topbar__actions">
                 <span id="userBadge" class="pill pill--muted">Not signed in</span>
@@ -171,7 +192,7 @@ def render_shell(title: str = "Video Topic Annotation") -> str:
             </section>
         </main>
     </div>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=2" defer></script>
 </body>
 </html>"""
 
@@ -225,12 +246,16 @@ def init_schema() -> None:
             CREATE INDEX IF NOT EXISTS idx_tasks_claimed_by ON tasks(claimed_by_user_id, status);
             CREATE INDEX IF NOT EXISTS idx_tasks_point_type ON tasks(point_id, task_type);
         """)
+        # Purge invalid users on startup
+        _purge_invalid_users(conn)
 
 # --- User ---
 def get_user_id(conn: sqlite3.Connection, username: str) -> int:
     normalized = username.strip()
     if not normalized:
         raise HTTPException(status_code=400, detail="Username is required")
+    if not _is_valid_username(normalized):
+        raise HTTPException(status_code=400, detail="Invalid username")
     now = to_iso(utcnow())
     row = conn.execute("SELECT id FROM users WHERE username = ?", (normalized,)).fetchone()
     if row is None:
@@ -377,6 +402,20 @@ def submit_task(task_id: int, username: str, response: dict[str, Any]) -> dict[s
             raise HTTPException(status_code=409, detail="Task is already completed")
         if row["claimed_by_user_id"] not in (None, user_id):
             raise HTTPException(status_code=403, detail="Task is claimed by another annotator")
+        # Normalize response for image_intrusion: prefer original index when provided
+        if row["task_type"] == "image_intrusion" and isinstance(response, dict):
+            orig = response.get("selected_image_original_index")
+            if orig is not None:
+                try:
+                    response["selected_image_index"] = int(orig)
+                except (TypeError, ValueError):
+                    pass
+            elif "selected_image_index" in response:
+                try:
+                    response["selected_image_index"] = int(response["selected_image_index"])
+                except (TypeError, ValueError):
+                    pass
+
         now_iso = to_iso(utcnow())
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
